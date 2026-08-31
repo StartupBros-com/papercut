@@ -357,6 +357,12 @@ function record(input) {
 function storeDir() {
   const override = process.env.PAPERCUT_STORE;
   if (override && override.trim()) return override.trim();
+  // CLAUDE_CONFIG_DIR next, exactly as cli.py resolves its store root: found
+  // by dogfooding v0.1.1 against a scratch profile (2026-08-31) — the hook
+  // wrote to the real homedir store while every CLI read looked under the
+  // overridden config dir. Same split-corpus failure as above, new spelling.
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  if (configDir && configDir.trim()) return path.join(configDir.trim(), 'papercuts');
   return path.join(os.homedir(), '.claude', 'papercuts');
 }
 
