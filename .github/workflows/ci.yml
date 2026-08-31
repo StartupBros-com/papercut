@@ -1,0 +1,74 @@
+name: CI
+
+# Contract checks every hov plugin carries (VERSION/manifest lockstep, the
+# announce train's OIDC pin), plus what papercut uniquely ships: a unit-test
+# suite and two runnable contracts — stdlib-only, and zero private references.
+# Runs on hosted runners, so it lights up when the repo goes public.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests and shipped contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          persist-credentials: false
+      - name: unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tail -5
+      - name: stdlib-only contract
+        run: python3 scripts/check_stdlib_only.py
+      - name: zero private references
+        run: python3 scripts/check_no_private_refs.py
+
+  contract:
+    name: marketplace contract
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          persist-credentials: false
+      - name: VERSION and plugin manifest move in lockstep
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          manifest="$(jq -er '.version' .claude-plugin/plugin.json)"
+          printf 'VERSION=%s plugin.json=%s\n' "$version" "$manifest"
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::VERSION '$version' is not semver"; exit 1 ;;
+          esac
+          [ "$version" = "$manifest" ] || {
+            echo "::error::VERSION $version != plugin.json $manifest — the announce train refuses to post on a mismatch"
+            exit 1
+          }
+      - name: Plugin manifest names this repo
+        run: |
+          name="$(jq -er '.name' .claude-plugin/plugin.json)"
+          [ "$name" = "${GITHUB_REPOSITORY#*/}" ] || {
+            echo "::error::plugin.json name '$name' does not match the repository"
+            exit 1
+          }
+          test -f "skills/$name/SKILL.md" || {
+            echo "::error::missing skills/$name/SKILL.md — the marketplace validator requires it"
+            exit 1
+          }
+      - name: Announce train stays on the shared OIDC workflow
+        run: |
+          wf=.github/workflows/release-train.yml
+          test -f "$wf" || { echo "::error::missing $wf"; exit 1; }
+          grep -Eq 'hov-tool-drop-announce\.yml@[0-9a-f]{40}' "$wf" || {
+            echo "::error::release train must call the shared announce workflow pinned to a full commit SHA"
+            exit 1
+          }
+          grep -Eq '^[[:space:]]*id-token:[[:space:]]*write[[:space:]]*$' "$wf" || {
+            echo "::error::release train needs id-token: write for OIDC"
+            exit 1
+          }
