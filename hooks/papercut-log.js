@@ -206,7 +206,7 @@ function basename(p) {
 // would push a record past MAX_RECORD_BYTES and drop it entirely.
 const SUBJ = (s) => String(s).slice(0, 100);
 
-function signature(err, toolName) {
+function signature(err, toolName, target) {
   const e = String(err || '');
   let m;
 
@@ -224,7 +224,15 @@ function signature(err, toolName) {
   // instead of joining this one (measured by live probe, 2026-08-06).
   if ((m = ENOENT_NODE.exec(e) || ENOENT_COREUTILS.exec(e))) return `no_such_file:${basename(m[1])}`;
   if ((m = ENOENT_TOOL.exec(e)) && m[1]) return `no_such_file:${basename(m[1])}`;
-  if (/ENOENT|No such file or directory|File does not exist/i.test(e)) return 'no_such_file';
+  // Read/Edit say only "File does not exist." — the path never appears in the
+  // message, so the recovered-subject branches above cannot fire and 217
+  // sessions/30d collapsed into one generic bucket. The captured target is
+  // the subject (measured 2026-08-30: the top cluster inside the generic key
+  // was .compound-engineering/config.yaml probes across 6+ repos).
+  if (/ENOENT|No such file or directory|File does not exist/i.test(e)) {
+    if (target) return `no_such_file:${basename(target)}`;
+    return 'no_such_file';
+  }
   if (/Permission denied|EACCES/.test(e)) return 'permission_denied';
   if ((m = e.match(/already (?:exists|used by worktree)/i))) return `worktree_collision:${normalize(m[0])}`;
   // A StructuredOutput schema rejection names the FIRST missing property, which
@@ -314,7 +322,7 @@ function record(input) {
 
   const rec = {
     ts: new Date().toISOString(),
-    sig: signature(err, input.tool_name),
+    sig: signature(err, input.tool_name, target),
     tool: String(input.tool_name || 'unknown').slice(0, 40),
     err: err.slice(0, MAX_ERR_CHARS),
     cmd: String(cmd).slice(0, 200),
