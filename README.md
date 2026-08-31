@@ -1,6 +1,6 @@
 # papercut
 
-**Status: release candidate. Sanitized, tested, not yet announced** — publication waits on the first fix completing its live verification window in the source harness, so the README's central claim is witnessed, not promised.
+**Status: first release.** Sanitized and tested (packaged suite green, zero private references, CI-enforced). The verification machinery's claims are witnessed to different depths, stated here exactly: the refuse-verified-on-silence rule is enforced by tests; regression detection has fired on live data (and been correctly disposed where member signatures track intended behavior); the first *positive* verified-fix cycle is in progress in the source harness — exposure floor 71/187 at publication, window completing 2026-09-28.
 
 Agents hit small frictions constantly — a misleading error, an undocumented
 step, a command that succeeds but does the wrong thing — and route around all
