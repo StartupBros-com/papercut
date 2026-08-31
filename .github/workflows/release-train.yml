@@ -1,0 +1,18 @@
+name: Release train
+
+# Announce-only Tool Drop train, shared across the whole hov catalog.
+# All logic lives in hov-marketplace (the catalog announces itself);
+# identity is the workflow's OIDC token — no shared secret, no per-repo
+# scoping. Bump the pin when the reusable workflow changes.
+
+on:
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  announce:
+    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@c981b872ebf650805200ad72c8b7142232f8b3f6 # feat: marketplace as Tool Drop source of truth
