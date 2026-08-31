@@ -1005,7 +1005,7 @@ class TestStaleness(PapercutBase):
         ).stdout
 
     def test_empty_store_with_active_sessions_warns_specifically(self):
-        # The cass shape: capture is dead but silence looks like "nothing happened".
+        # The dead-index shape: capture is dead but silence looks like "nothing happened".
         out = self.staleness()
         self.assertIn("WARN papercut capture", out)
         self.assertIn("EMPTY", out)

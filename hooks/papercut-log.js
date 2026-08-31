@@ -449,6 +449,41 @@ function logDenial({ guard, cwd, sessionId, tool, command, reason }) {
   }
 }
 
+// an earlier change: agents Read whole .jsonl transcripts/stores past the token
+// ceiling and retry the same file (measured 2026-08-30: 72% of target-bearing
+// read-limit records, one file re-read 11x in a session). The error's own
+// offset/limit advice fails to redirect because the agent wants the WHOLE
+// content; the tools that answer that want are named here instead, at the
+// exact moment of failure. Informational phrasing only — imperative
+// additionalContext has measurably backfired in this harness.
+const READ_LIMIT_ERR = /exceeds maximum allowed (?:tokens|size)/i;
+const TRANSCRIPT_PATH = /\/\.claude\/projects\/[^\s]*\.jsonl$/;
+
+// The config base is CLAUDE_CONFIG_DIR when set (papercut.py resolves its
+// store the same way) -- a hardcoded /.claude/projects/ substring misroutes
+// every transcript to the generic store hint under an overridden config dir
+// (refute-vet finding, 2026-08-30). The regex stays as a fallback for
+// transcripts living under someone else's tree.
+function isTranscriptTarget(target) {
+  const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  return target.startsWith(path.join(base, 'projects') + path.sep)
+    || TRANSCRIPT_PATH.test(target);
+}
+
+function readLimitHint(input) {
+  if (String(input.tool_name) !== 'Read') return null;
+  const err = extractError(input);
+  if (!READ_LIMIT_ERR.test(err)) return null;
+  const target = String((input.tool_input && input.tool_input.file_path) || '');
+  if (!/\.jsonl$/.test(target)) return null;
+  if (isTranscriptTarget(target)) {
+    return ('This target is a session transcript larger than the Read ceiling. '
+      + 'jq, grep and tail can slice it without loading the whole file.');
+  }
+  return ('This target is a .jsonl store larger than the Read ceiling. '
+    + 'jq, grep and tail filter it without loading the whole file.');
+}
+
 function run(rawInput) {
   let input = {};
   try { input = JSON.parse(rawInput); } catch { return rawInput; }
@@ -458,12 +493,31 @@ function run(rawInput) {
   } catch {
     // A logger must never break a session. Swallow everything.
   }
+
+  // an earlier change: on the one failure shape where the error's own advice cannot
+  // help (a whole-.jsonl read past the ceiling), answer with the tool that
+  // can. additionalContext is the documented PostToolUseFailure channel; the
+  // hint path replaces the legacy raw-input echo for THIS shape only, and a
+  // hint failure falls back to the echo — never a broken session.
+  try {
+    const hint = readLimitHint(input);
+    if (hint) {
+      return JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUseFailure',
+          additionalContext: hint,
+        },
+      });
+    }
+  } catch {
+    // fall through to the pass-through echo
+  }
   return rawInput;
 }
 
 module.exports = {
   run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
-  appendRecord, logDenial,
+  appendRecord, logDenial, readLimitHint,
 };
 
 if (require.main === module) {

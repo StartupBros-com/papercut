@@ -41,6 +41,10 @@ LITERALS: list[tuple[str, str, bool]] = [
     ("private-dotfiles-path", "~/dotfiles", True),
     ("private-repo-name", "dotfiles", True),
     ("private-project", "smaug", True),
+    # Personal transcript-search CLI; a hint naming it must never ship
+    # (refute-vet finding 2026-08-30: the vendor rule scrubs it, but the
+    # gate must catch what the transform one day misses).
+    ("private-tool", "cass", True),
     ("private-project", "pi-evals", True),
     ("private-project", "prbot", True),
     ("private-project", "blog-writer", True),

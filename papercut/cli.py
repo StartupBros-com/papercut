@@ -23,7 +23,7 @@ four repos is a bug report that writes itself.
 WHY THE ROLLUP SHIPS WITH THE LOGGER: this harness has three live precedents of
 capture built and consumption never wired — wf-pin-audit.py (cited in CLAUDE.md
 as "defense-in-depth", invoked by nothing), 19 of 81 memory notes in one store
-describing a pipeline that does not exist on this filesystem, and cass reporting
+describing a pipeline that does not exist on this filesystem, and an indexing tool reporting
 green systemd exits while its lexical index went 21 days stale. A write-only
 papercut store would be the fourth. It is not optional.
 
@@ -970,7 +970,7 @@ def cmd_resolve(args: argparse.Namespace) -> None:
 
 def cmd_staleness(args: argparse.Namespace) -> None:
     """Is capture still alive? Silence is ambiguous — it means either 'no friction'
-    or 'the hook died'. cass exited 0 daily for 21 days while its index silently
+    or 'the hook died'. A sibling indexing tool exited 0 daily for 21 days while its index silently
     never refreshed; this is the check that shape needs.
     """
     newest_cut = 0.0
