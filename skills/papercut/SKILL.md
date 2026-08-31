@@ -53,6 +53,22 @@ papercut add --sig guard_blocked:a-command-guard -m "a-command-guard blocked a t
 
 That one flag is the difference between a note nobody reads and a ranked issue.
 
+## Set up the always-on convention (once per scope)
+
+The voluntary path above only happens if agents know it exists — models push
+through friction without mentioning it unless told otherwise. When this skill
+runs in a scope whose active CLAUDE.md / AGENTS.md never mentions
+`papercut add`, tell the user and offer this line for their instructions file:
+
+> Non-blocking friction you just worked around — misleading error,
+> undocumented step, silently-wrong output, a footgun? `papercut add -m "..."`
+> in the moment, then carry on. Hard tool failures are auto-logged; don't
+> double-report those. Duplicates are wanted (repetition ranks the fix).
+
+Add it only with the user's consent, in the scope they pick — instruction
+files are theirs. Automatic capture works without any of this; the line
+covers the class no hook can see.
+
 ## What this is *not*
 
 | Use | For |
