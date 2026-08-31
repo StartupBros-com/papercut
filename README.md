@@ -192,6 +192,11 @@ verified clean, and `scripts/check_no_private_refs.py` holds the private
 reference count at zero (it was 183 before the transform existed). See
 [docs/EXTRACTION-DESIGN.md](docs/EXTRACTION-DESIGN.md) for the design record.
 
+The capture idea traces to [Steve Ruiz's "papercuts" CLI](https://x.com/steveruizok/status/2075303919664734295),
+a tiny tool agents could use to complain about the friction they normally push
+through silently. This implementation adds the automatic hook capture, causal
+families, and the verification stage.
+
 ```bash
 python3 scripts/check_stdlib_only.py      # dependency contract
 python3 scripts/check_no_private_refs.py  # sanitization, as a number
