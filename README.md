@@ -12,10 +12,10 @@ into ranked, tracked, verified fixes.
 
 ## The problem
 
-Agents hit dozens of snags a day — a misleading error, a file that is always
-too big to read, a config probe that fails on every run — and they work around
-all of it without telling you. Each workaround costs tokens and time, every
-session, forever. Friction nobody records is friction nobody fixes.
+Agents hit dozens of snags a day: a misleading error, a file that is always
+too big to read, a config probe that fails on every run. They work around all
+of it without telling you, and each workaround costs tokens and time in every
+later session too. Friction nobody records is friction nobody fixes.
 
 ## The solution
 
@@ -24,9 +24,9 @@ to turn the pile into fixes:
 
 | | |
 |---|---|
-| Capture | A `PostToolUseFailure` hook logs every hard tool failure — no agent cooperation needed, no tokens spent |
-| Rank | Signatures sort by **distinct sessions hit**, so repetition is the priority signal, not noise |
-| Fold | Related signatures group into a causal **family**; you fix the cause, not each spelling of it |
+| Capture | A `PostToolUseFailure` hook logs every hard tool failure automatically, at zero token cost |
+| Rank | Signatures sort by **distinct sessions hit**, so repetition drives priority |
+| Fold | Related signatures group into a causal **family**, so a cause gets one fix rather than one filing per spelling |
 | File | One family at a time carries an evidence dossier into a filed, tracked work item |
 | Verify | A fix only reads **verified** after enough real traffic has passed to make silence meaningful |
 
@@ -49,8 +49,8 @@ python3 -m papercut adopt my-family        # validate the dossier, file the work
 
 ## Design philosophy
 
-- **Silence has two causes.** A quiet signature means the fix worked — or
-  nobody was around to hit the problem. Verification measures exposure
+- **Silence has two causes.** A quiet signature means the fix worked, or
+  that nobody was around to hit the problem. Verification measures exposure
   (distinct capture sessions since the fix) against a floor before quiet
   counts as anything.
 - **Capture costs nothing.** The hook exits 0 with no stdout, so records never
@@ -61,9 +61,9 @@ python3 -m papercut adopt my-family        # validate the dossier, file the work
   before logging.
 - **Quarantine defers, never deletes.** Junk fingerprints leave the ranking
   but stay on disk and visible (`list --quarantined`); the fix for a bad
-  fingerprint is better fingerprinting, not deletion.
+  fingerprint is better fingerprinting.
 - **A closed work item is a claim, not a result.** Families carry a derived
-  verification stage — `verifying`, `verified`, `provisional`, `regressed` —
+  verification stage (`verifying`, `verified`, `provisional`, `regressed`)
   recomputed from the store on every read. Nothing stores a verdict that could
   go stale.
 
@@ -76,7 +76,7 @@ python3 -m papercut adopt my-family        # validate the dossier, file the work
 /plugin install papercut@hov
 ```
 
-**Standalone CLI** (stdlib-only Python, no dependencies):
+**Standalone CLI** (stdlib-only Python):
 
 ```bash
 git clone https://github.com/StartupBros-com/papercut.git
@@ -104,7 +104,7 @@ Standalone use captures nothing until the hook is registered. The plugin's
 
 1. Install the plugin (above). New sessions start capturing immediately.
 2. Work normally for a few days. Optionally tell your agents about the
-   voluntary path — one line in your agent instructions: *"non-blocking
+   voluntary path with one line in your agent instructions: *"non-blocking
    friction you worked around? `papercut add -m \"...\"` and carry on."*
 3. Run `python3 -m papercut list --days 7`. The ranking is the answer to
    "what keeps hurting."
@@ -132,7 +132,7 @@ Run any command with `-h` for its full flags.
 ## Configuration
 
 Optional file at `${CLAUDE_CONFIG_DIR:-~/.claude}/papercut.json`, or
-environment variables — env wins. Defaults are chosen so an empty config is a
+environment variables; env wins. Defaults are chosen so an empty config is a
 working install.
 
 | Variable | Purpose |
@@ -153,7 +153,7 @@ working install.
 | `list` shows nothing actionable | Thresholds are 3+ distinct sessions and 3+ hits; `list -v` shows everything below them |
 | `rollup --apply` or `adopt` errors mentioning `gh` | Filing needs an authenticated GitHub CLI. Capture and reporting work without it |
 | Records landing somewhere unexpected | The store follows `CLAUDE_CONFIG_DIR`, then `PAPERCUT_STORE` |
-| A junk signature ranks high | `list --quarantined` shows what is already filtered; a new junk shape is a fingerprinting bug — issues welcome |
+| A junk signature ranks high | `list --quarantined` shows what is already filtered; a new junk shape is a fingerprinting bug, and issues are welcome |
 
 ## Limitations
 
@@ -161,7 +161,7 @@ working install.
 - The store is per-machine. There is no team aggregation.
 - Verification exposure is a proxy: store-wide session liveness says agents
   were working, not that the fixed path was exercised. Low-traffic fixes can
-  sit `provisional` indefinitely — that is the correct answer, not a bug.
+  sit `provisional` indefinitely; that is the correct answer.
 - Filing (`rollup --apply`, `adopt`) requires the `gh` CLI; everything else is
   stdlib-only Python plus Node for the hook.
 - The voluntary `add` path only happens if your agents are told to use it.
@@ -186,7 +186,7 @@ with no stdout. The one exception is documented under Design philosophy.
 The store remains; delete it if you want the history gone.
 
 **Where did this code come from?** It is extracted from a working private
-harness by a re-runnable sanitizing transform — comments citing evidence are
+harness by a re-runnable sanitizing transform: comments citing evidence are
 translated rather than stripped, output is verified to parse before it is
 verified clean, and `scripts/check_no_private_refs.py` holds the private
 reference count at zero (it was 183 before the transform existed). See
