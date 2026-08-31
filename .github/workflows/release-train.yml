@@ -1,9 +1,12 @@
 name: Release train
 
 # Announce-only Tool Drop train, shared across the whole hov catalog.
-# All logic lives in hov-marketplace (the catalog announces itself);
-# identity is the workflow's OIDC token — no shared secret, no per-repo
-# scoping. Bump the pin when the reusable workflow changes.
+# Identity is the workflow's OIDC token — no shared secret, no per-repo
+# scoping. Pinned to the HARDENED announce workflow (08f7d22f); the earlier
+# bare-caller shape at c981b872 is retired per token-eater's release policy
+# smoke test. The verify job is deliberately self-contained: release tag must
+# be an ancestor of the protected default branch, nothing else — papercut has
+# no promote machinery yet, and announce still refuses drafts/prereleases.
 
 on:
   release:
@@ -11,8 +14,36 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: release-train-papercut
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    if: github.event.release.draft == false
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require release commit on protected default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH"
+          release_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          git merge-base --is-ancestor "$release_sha" "origin/$DEFAULT_BRANCH"
+
   announce:
-    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@c981b872ebf650805200ad72c8b7142232f8b3f6 # feat: marketplace as Tool Drop source of truth
+    name: Announce via canonical OIDC train
+    needs: verify
+    if: github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@08f7d22f3a5b59b1658ab2e96a20d0d3c352869c

@@ -64,8 +64,16 @@ jobs:
         run: |
           wf=.github/workflows/release-train.yml
           test -f "$wf" || { echo "::error::missing $wf"; exit 1; }
-          grep -Eq 'hov-tool-drop-announce\.yml@[0-9a-f]{40}' "$wf" || {
-            echo "::error::release train must call the shared announce workflow pinned to a full commit SHA"
+          grep -Fq 'hov-tool-drop-announce.yml@08f7d22f3a5b59b1658ab2e96a20d0d3c352869c' "$wf" || {
+            echo "::error::release train must call the HARDENED announce workflow pin (08f7d22f)"
+            exit 1
+          }
+          ! grep -Fq 'c981b872ebf650805200ad72c8b7142232f8b3f6' "$wf" || {
+            echo "::error::retired announce pin c981b872 is forbidden"
+            exit 1
+          }
+          grep -Fq "github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'" "$wf" || {
+            echo "::error::announce must be gated on non-draft, non-prerelease, and a green verify"
             exit 1
           }
           grep -Eq '^[[:space:]]*id-token:[[:space:]]*write[[:space:]]*$' "$wf" || {
