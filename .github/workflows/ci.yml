@@ -28,6 +28,10 @@ jobs:
         run: python3 scripts/check_stdlib_only.py
       - name: zero private references
         run: python3 scripts/check_no_private_refs.py
+      - name: Provision pinned CI tools
+        run: ./scripts/provision-ci-tools.sh
+      - name: release-policy smoke
+        run: bash tests/release-train.test.sh
 
   contract:
     name: marketplace contract
