@@ -149,6 +149,16 @@ const WRAPPER_LINE = /^\s*(?:exit code\s*\d+|command failed(?: with exit code \d
 // actual `ExceptionType: message` is the LAST line of a traceback, not the first.
 const TRACEBACK_HDR = /^Traceback \(most recent call last\):$/;
 
+// Node's mirror image of the Python-traceback problem, opposite geometry: a
+// dump opens with the throw-site frame (`node:internal/modules/run_main:107`)
+// and the actual `Error: message` sits several lines DOWN, after the caret
+// block — so keying on the first content line split real causes (esbuild's
+// top-level-await error, ERR_MODULE_NOT_FOUND, ...) across three structural
+// signatures totalling 70+ sessions/30d. When the first line is a node
+// internal frame, the key is the first Error-shaped line below it.
+const NODE_INTERNAL_HDR = /^node:internal\//;
+const NODE_ERROR_LINE = /^(?:[A-Z][A-Za-z]*)?Error(?:\s*\[[A-Z0-9_]+\])?:/;
+
 // A trailing-ellipsis opener ("Checking formatting...") announces work, not
 // failure; keying on it ranked prettier's banner as friction (41 sessions /
 // 127 records by 2026-08-29) while the informative "[warn] Code style issues
@@ -173,6 +183,11 @@ function signalLine(text) {
   if (TRACEBACK_HDR.test(picked)) {
     for (let i = lines.length - 1; i >= 0; i--) {
       if (lines[i].trim()) return lines[i].trim();
+    }
+  }
+  if (NODE_INTERNAL_HDR.test(picked)) {
+    for (const line of lines) {
+      if (NODE_ERROR_LINE.test(line.trim())) return line.trim();
     }
   }
   return picked;
