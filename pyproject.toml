@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "papercut"
-version = "0.1.5"
+version = "0.1.6"
 description = "Capture the friction agents route around silently, then mine it into ranked, tracked fixes."
 readme = "README.md"
 requires-python = ">=3.10"
