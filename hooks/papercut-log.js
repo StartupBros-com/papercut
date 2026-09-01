@@ -476,6 +476,49 @@ function isTranscriptTarget(target) {
     || TRANSCRIPT_PATH.test(target);
 }
 
+// From the third identical failure the hint escalates and drops the
+// type restriction: 692 of 768 read-limit records since 2026-08-31 were the
+// same session re-attempting the same file (worst: 59 attempts on one review
+// diff), overwhelmingly on non-jsonl files where the first-attempt advice
+// (offset/limit) is right and therefore silent. The store the hook just
+// appended to is the state; only the tail is scanned, and any failure in the
+// counting path falls back to the ordinary single-attempt behavior.
+const REPEAT_THRESHOLD = 3;
+const REPEAT_SCAN_LINES = 300;
+
+function repeatCount(storeFile, session, target, sig) {
+  try {
+    const lines = fs.readFileSync(storeFile, 'utf8').split('\n');
+    let count = 0;
+    for (const line of lines.slice(-REPEAT_SCAN_LINES)) {
+      if (!line) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r.session === session && r.target === target && r.sig === sig) count += 1;
+      } catch { /* skip unparsable line */ }
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+function readLimitRepeatHint(input, storeFile) {
+  if (String(input.tool_name) !== 'Read') return null;
+  const err = extractError(input);
+  if (!READ_LIMIT_ERR.test(err)) return null;
+  const target = String((input.tool_input && input.tool_input.file_path) || '');
+  if (!target) return null;
+  const session = String(input.session_id || '').slice(-8);
+  const seen = repeatCount(storeFile, session, target,
+    signature(redact(err.slice(0, MAX_INPUT_CHARS)), input.tool_name, target));
+  if (seen < REPEAT_THRESHOLD) return null;
+  return ('Attempt ' + seen + ' on this file in this session: it cannot be '
+    + 'Read whole. Reading a specific region works: pass offset and limit '
+    + '(a few hundred lines), or Grep for the part that matters and read '
+    + 'around the match.');
+}
+
 function readLimitHint(input) {
   if (String(input.tool_name) !== 'Read') return null;
   const err = extractError(input);
@@ -506,7 +549,8 @@ function run(rawInput) {
   // hint path replaces the legacy raw-input echo for THIS shape only, and a
   // hint failure falls back to the echo — never a broken session.
   try {
-    const hint = readLimitHint(input);
+    const hint = readLimitRepeatHint(input, path.join(storeDir(), `${projectSlug(input.cwd)}.jsonl`))
+      || readLimitHint(input);
     if (hint) {
       return JSON.stringify({
         hookSpecificOutput: {
