@@ -208,6 +208,14 @@ function isContentFree(text) {
 const ENOENT_NODE = /no such file or directory,\s*\w+\s*'([^']+)'/i;
 const ENOENT_COREUTILS = /['"]?([^\s'"\n:][^\n:]*?)['"]?:\s*No such file or directory/i;
 const ENOENT_TOOL = /File does not exist\.?\s*(?:Did you mean\s+(\S+))?/i;
+// Python's errno formatting: `[Errno 2] No such file or directory: '<path>'`.
+// Neither existing pattern matches it (node uses a comma, coreutils puts the
+// subject BEFORE the phrase), so 90+ peer-review runner failures and every
+// Python ENOENT fleet-wide collapsed into the generic bucket — the same
+// invisible-cluster shape the CE config probes had before target keying
+// (measured 2026-09-01; upstream report EveryInc#1607 shipped blind because
+// the family could not be assigned honest members).
+const ENOENT_PYTHON = /No such file or directory:\s*'([^']+)'/;
 
 /** Path tail — the varying directory prefix is noise, the filename is the subject. */
 function basename(p) {
@@ -237,7 +245,7 @@ function signature(err, toolName, target) {
   // `File does not exist` is the Read/Edit/Write phrasing for the same friction
   // Bash reports as ENOENT; without it those fragmented into the generic bucket
   // instead of joining this one (measured by live probe, 2026-08-06).
-  if ((m = ENOENT_NODE.exec(e) || ENOENT_COREUTILS.exec(e))) return `no_such_file:${basename(m[1])}`;
+  if ((m = ENOENT_NODE.exec(e) || ENOENT_PYTHON.exec(e) || ENOENT_COREUTILS.exec(e))) return `no_such_file:${basename(m[1])}`;
   if ((m = ENOENT_TOOL.exec(e)) && m[1]) return `no_such_file:${basename(m[1])}`;
   // Read/Edit say only "File does not exist." — the path never appears in the
   // message, so the recovered-subject branches above cannot fire and 217
