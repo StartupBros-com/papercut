@@ -331,6 +331,14 @@ gap to paper over. Nothing here writes: no event is appended, no verdict is
 stored, and GitHub is never contacted, so a regression shows up the next time
 anyone looks rather than being frozen into a stale verdict.
 
+**Pick member signatures whose silence is the success signal — or scope
+them.** When the only available signature counts a superset of the remedy's
+claim (measured three times now), record the claim boundary instead of
+disposing: `papercut family scope <family> <sig> --target-suffix .jsonl`
+makes recurrence and verification read only matching targets while ranking
+keeps full volume. The suffix must come from the dossier's No-Claim
+Boundary — scoping tighter than the written claim hides real recurrence.
+
 **Pick member signatures whose silence is the success signal.** Recurrence
 and verification read member records, so a member signature that fires when
 the mechanism works *as intended* can never validate a fix — it reads

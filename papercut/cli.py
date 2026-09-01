@@ -308,7 +308,7 @@ DOSSIERS = STORE / "state" / "dossiers"
 FAMILY_SCHEMA_VERSION = 1
 FAMILY_ACTIONS = {
     "create", "assign", "unassign", "adopt", "escalate", "dispose", "reopen",
-    "close-observed", "recur-comment",
+    "close-observed", "recur-comment", "scope",
 }
 DISPOSE_VERDICTS = {"intended-policy", "insufficient-evidence", "upstream-reported"}
 FAMILY_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,100}")
@@ -586,6 +586,7 @@ def fold_families(events: list[dict] | None = None) -> dict:
     ordered.sort(key=lambda item: (item[0], item[1]))
 
     membership: dict[str, str] = {}
+    scopes: dict[str, str] = {}
     adoption: dict[str, dict] = {}
     for _, _, event in ordered:
         action = event["action"]
@@ -594,12 +595,26 @@ def fold_families(events: list[dict] | None = None) -> dict:
         sig = event.get("sig")
         if action == "assign" and sig:
             membership[str(sig)] = family
+            # A fresh assignment is unscoped: whatever claim boundary the
+            # previous family recorded does not travel with the signature.
+            scopes.pop(str(sig), None)
         elif action == "unassign" and sig:
             # Scoped to the named family. An unassign recorded against family A
             # must not evict a signature that a later assign moved into family B;
             # the event stays in the log as a no-op audit record.
             if membership.get(str(sig)) == family:
                 membership.pop(str(sig), None)
+                scopes.pop(str(sig), None)
+        elif action == "scope" and sig:
+            # Claim boundary refinement (see member_record): meaningful only
+            # for a signature currently assigned to THIS family; anything else
+            # stays a no-op audit record, like a cross-family unassign.
+            if membership.get(str(sig)) == family:
+                suffix = str(event.get("target_suffix") or "").strip()
+                if suffix:
+                    scopes[str(sig)] = suffix
+                else:
+                    scopes.pop(str(sig), None)
         elif action == "create":
             state["created"] = True
         elif action == "adopt":
@@ -668,6 +683,7 @@ def fold_families(events: list[dict] | None = None) -> dict:
 
     return {
         "membership": dict(sorted(membership.items())),
+        "scopes": dict(sorted(scopes.items())),
         "adoption": {family: adoption[family] for family in sorted(adoption)},
     }
 
@@ -889,13 +905,15 @@ def family_show_data(family: str | None = None,
         # operator scanning every family is exactly the one who needs to spot a
         # regression without already knowing which family to ask about.
         folded["verification"] = verification_view(
-            folded["adoption"], folded["membership"], window)
+            folded["adoption"], folded["membership"], window,
+            folded.get("scopes"))
         return folded
     family = validate_family_id(family)
     state = folded["adoption"].get(family, family_state(family))
     members = sorted(sig for sig, assigned in folded["membership"].items() if assigned == family)
     horizon = verification_horizon_days([state], window)
-    verification = (verification_details(state, set(members), list(read_records(horizon)), window)
+    verification = (verification_details(state, set(members), list(read_records(horizon)),
+                                         window, scopes=folded.get("scopes"))
                     if horizon else None)
     return {
         "family": family,
@@ -1458,6 +1476,46 @@ def cmd_family_create(args: argparse.Namespace) -> None:
     family = validate_family_id(args.family)
     record_family_event(family, "create")
     print(f"family created: {family}")
+
+
+def cmd_family_scope(args: argparse.Namespace) -> None:
+    """Record a claim boundary for one member signature.
+
+    Deliberately allowed on terminal families: the live need is a CLOSED
+    family whose signature over-counts its remedy (the dossier's No-Claim
+    Boundary already names the narrower claim — this event encodes it where
+    verification can read it). The honesty constraint is printed, not
+    enforced: scoping TIGHTER than the written boundary hides recurrence, so
+    the suffix must come from the dossier, and ranking keeps whole-signature
+    volume visible either way.
+    """
+    family = validate_family_id(args.family)
+    if not args.sig:
+        family_error("policy refusal: raw signature must not be empty", 3)
+    suffix = "" if args.clear else str(args.target_suffix or "").strip()
+    if not args.clear and not suffix:
+        family_error("policy refusal: --target-suffix must be non-empty (or pass --clear)", 3)
+
+    def owns_sig(_state):
+        # Refolding inside the guard mirrors record_family_event's own
+        # inside-the-lock fold; membership is checked in the same critical
+        # section that appends, so a concurrent unassign cannot race past it.
+        held = fold_families()["membership"].get(args.sig)
+        if held != family:
+            family_error(
+                f"policy refusal: {args.sig} is not assigned to {family}"
+                + (f" (held by {held})" if held else " (unassigned)"), 3)
+        return True
+
+    record_family_event(family, "scope", sig=args.sig, target_suffix=suffix,
+                        guard=owns_sig)
+    if args.clear:
+        print(f"family scope cleared: {args.sig} in {family}")
+    else:
+        print(f"family scoped: {args.sig} in {family} -> targets ending {suffix}")
+        print("  (verification and recurrence read only matching targets; the "
+              "ranking keeps full volume. The suffix must match the dossier's "
+              "No-Claim Boundary — narrower hides real recurrence.)")
 
 
 def cmd_family_assign(args: argparse.Namespace) -> None:
@@ -2442,13 +2500,35 @@ def recurrence_boundary(state: dict) -> str | None:
     return max(parsed, key=lambda pair: pair[0])[1]
 
 
-def has_new_recurrence(state: dict, members, records) -> bool:
-    """True when some member record postdates both the closure and the last comment."""
+def member_record(members, scopes, record) -> bool:
+    """Does this record count toward the family's CLAIM?
+
+    Membership matches the signature; a scope (when present) further requires
+    the captured target to end with the recorded suffix. Third live occurrence
+    of the need (2026-09-01): whole-transcript-reads' remedy claims only
+    oversized .jsonl reads, but its member signature fires on every oversized
+    read — 131 post-closure records, zero in scope, and the stage read
+    `regressed` over records the dossier's No-Claim Boundary never covered.
+    Records without a captured target cannot prove they are in scope, so a
+    scoped signature does not count them — the same fail-closed posture as
+    session-less records in exposure counting.
+    """
+    sig = record.get("sig")
+    if sig not in members:
+        return False
+    suffix = (scopes or {}).get(sig)
+    if not suffix:
+        return True
+    return str(record.get("target") or "").endswith(suffix)
+
+
+def has_new_recurrence(state: dict, members, records, scopes=None) -> bool:
+    """True when some CLAIMED member record postdates closure and last comment."""
     boundary = recurrence_boundary(state)
     if boundary is None:
         return False
     return any(
-        record["sig"] in members and newer_than(record.get("ts"), boundary)
+        member_record(members, scopes, record) and newer_than(record.get("ts"), boundary)
         for record in records
     )
 
@@ -2500,7 +2580,7 @@ def recurrence_body(family: str, entry: dict, days: int, marker: str) -> str:
     )
 
 
-def triage_recurrence(state: dict, members, records) -> dict:
+def triage_recurrence(state: dict, members, records, scopes=None) -> dict:
     """The triage banner's decision, sharing recur-comment's predicate exactly.
 
     A closed observation alone is a CLOSURE, not a recurrence: `detected` holds
@@ -2513,7 +2593,7 @@ def triage_recurrence(state: dict, members, records) -> dict:
     can say WHY the closed item is in the lane without pointing at an action
     that will no-op."""
     details = recurrence_details(state)
-    if details["detected"] and not has_new_recurrence(state, members, records):
+    if details["detected"] and not has_new_recurrence(state, members, records, scopes):
         return {**details, "detected": False, "closed_quiet": True}
     return details
 
@@ -2586,7 +2666,8 @@ def verification_horizon_days(states, window_days: int) -> int:
 
 def verification_details(state: dict, members, records,
                          window_days: int = VERIFY_WINDOW_DAYS,
-                         resolutions: dict[str, dict] | None = None) -> dict | None:
+                         resolutions: dict[str, dict] | None = None,
+                         scopes: dict[str, str] | None = None) -> dict | None:
     """Classify one adopted-and-closed family's fix. None when it has no closure.
 
     Exposure is store-wide distinct capture sessions, not family-specific eligible
@@ -2625,7 +2706,8 @@ def verification_details(state: dict, members, records,
     # then be promoted for the silence its own regression caused.
     boundary = recurrence_boundary(state)
     recurred = state.get("recur_comment") is not None or any(
-        record.get("sig") in live_members and newer_than(record.get("ts"), boundary)
+        member_record(live_members, scopes, record)
+        and newer_than(record.get("ts"), boundary)
         for record in records
     )
     if recurred:
@@ -2703,7 +2785,8 @@ def verification_line(family: str, details: dict) -> str:
     return f"  {family}: {verification_summary(details)}"
 
 
-def verification_view(adoption: dict, membership: dict, window_days: int) -> dict:
+def verification_view(adoption: dict, membership: dict, window_days: int,
+                      scopes: dict[str, str] | None = None) -> dict:
     """Every adopted-and-closed family's stage, keyed by family id."""
     horizon = verification_horizon_days(adoption.values(), window_days)
     if not horizon:
@@ -2713,7 +2796,8 @@ def verification_view(adoption: dict, membership: dict, window_days: int) -> dic
     view = {}
     for family, state in adoption.items():
         members = {sig for sig, assigned in membership.items() if assigned == family}
-        details = verification_details(state, members, records, window_days, resolutions)
+        details = verification_details(state, members, records, window_days,
+                                       resolutions, scopes)
         if details is not None:
             view[family] = details
     return view
@@ -2815,7 +2899,9 @@ def cmd_triage(args: argparse.Namespace) -> None:
                     "projects": entry["projects"],
                     "sample_excerpts": entry["samples"],
                     "member_signatures": entry["members"],
-                    "recurrence": triage_recurrence(state, entry["members"], records),
+                    "recurrence": triage_recurrence(
+                        state, entry["members"], records,
+                        family_views.get("scopes")),
                 })
     except OSError as exc:
         family_error(f"could not materialize triage dossier: {exc}")
@@ -2907,7 +2993,8 @@ def cmd_family_recur_comment(args: argparse.Namespace) -> None:
             if recurrence["commented"]:
                 print(f"family recurrence: already reported for {family} in this disposition epoch")
                 return
-            if not has_new_recurrence(state, entry["members"], records):
+            if not has_new_recurrence(state, entry["members"], records,
+                                      family_views.get("scopes")):
                 print(f"family recurrence: no member activity since the closure of {family}")
                 return
 
@@ -3263,7 +3350,8 @@ def cmd_rollup(args: argparse.Namespace) -> None:
     # Printed before the report-only return so the weekly rollup -- which never
     # passes --apply -- is itself the automatic re-measure. A closed family says
     # nothing here otherwise, and silence reads as "fixed".
-    verification = verification_view(adoption, family_views["membership"], window_days)
+    verification = verification_view(adoption, family_views["membership"], window_days,
+                                     family_views.get("scopes"))
     if verification:
         print(f"verification (window {window_days}d):")
         for family, details in verification.items():
@@ -3315,7 +3403,8 @@ def cmd_rollup(args: argparse.Namespace) -> None:
             locator = locator_fields(state.get("locator"))
             if state["lifecycle"] == "adopted" and state["closed_observation"] and locator:
                 repo, kind, number = locator
-                if not has_new_recurrence(state, entry["members"], eligible_records):
+                if not has_new_recurrence(state, entry["members"], eligible_records,
+                                      family_views.get("scopes")):
                     print(f"  SKIP {row_label(entry)}: no member activity since the closure "
                           f"of {repo}#{number}")
                     continue
@@ -3615,6 +3704,14 @@ def main() -> None:
     fc = family_sub.add_parser("create", help="create a family")
     fc.add_argument("family")
     fc.set_defaults(func=cmd_family_create)
+
+    fsc = family_sub.add_parser(
+        "scope", help="narrow one member signature's verification claim by target suffix")
+    fsc.add_argument("family")
+    fsc.add_argument("sig")
+    fsc.add_argument("--target-suffix", help="count only records whose target ends with this")
+    fsc.add_argument("--clear", action="store_true", help="remove the scope")
+    fsc.set_defaults(func=cmd_family_scope)
 
     fa = family_sub.add_parser("assign", help="assign an immutable raw signature to a family")
     fa.add_argument("family")

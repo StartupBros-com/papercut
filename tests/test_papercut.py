@@ -2550,6 +2550,93 @@ class TestVerificationLifecycle(PapercutBase):
         self.assertIn("window 4", out)
 
 
+class TestClaimScopedVerification(PapercutBase):
+    """`family scope` narrows recurrence/verification to the dossier's claim.
+
+    Born of the third live occurrence of one wall (a-vcs-guard, route-guard,
+    whole-transcript-reads): a member signature counting a superset of the
+    remedy reads `regressed` forever over records the No-Claim Boundary never
+    covered — measured 2026-09-01, 131 post-closure records, zero in scope.
+    """
+
+    SIG = "read:limit"
+
+    def close(self, family):
+        PC.record_family_event(family, "assign", sig=self.SIG)
+        PC.record_family_event(
+            family, "adopt", dossier_digest="d",
+            locator={"repo": "o/r", "kind": "issue", "number": 9,
+                     "url": "https://example.test/o/r/issues/9"})
+        PC.record_family_event(
+            family, "close-observed",
+            locator={"repo": "o/r", "kind": "issue", "number": 9,
+                     "url": "https://example.test/o/r/issues/9"},
+            observed_state="closed", observed_at=iso(days_ago=2))
+
+    def stage(self, family):
+        return PC.family_show_data(family)["verification"]["stage"]
+
+    def test_out_of_scope_recurrence_stops_reading_regressed(self):
+        self.close("scoped")
+        PC.record_family_event("scoped", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1,
+                                   target="/big/source-file.py")])
+        self.assertEqual(self.stage("scoped"), "verifying")
+
+    def test_in_scope_recurrence_still_regresses(self):
+        # Planted negative: the scope must not become a blanket pardon.
+        self.close("bitten")
+        PC.record_family_event("bitten", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1,
+                                   target="/x/transcript.jsonl")])
+        self.assertEqual(self.stage("bitten"), "regressed")
+
+    def test_unscoped_behavior_is_unchanged(self):
+        self.close("plain")
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1,
+                                   target="/big/source-file.py")])
+        self.assertEqual(self.stage("plain"), "regressed")
+
+    def test_a_targetless_record_cannot_prove_scope(self):
+        # Fail-closed: a legacy record with no captured target does not count
+        # toward a scoped claim (mirrors session-less exposure records).
+        self.close("legacy")
+        PC.record_family_event("legacy", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1)])
+        self.assertEqual(self.stage("legacy"), "verifying")
+
+    def test_scope_clears_on_reassignment_and_on_empty_suffix(self):
+        PC.record_family_event("first", "assign", sig=self.SIG)
+        PC.record_family_event("first", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        self.assertEqual(PC.fold_families()["scopes"], {self.SIG: ".jsonl"})
+        PC.record_family_event("first", "scope", sig=self.SIG, target_suffix="")
+        self.assertEqual(PC.fold_families()["scopes"], {})
+        PC.record_family_event("first", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        PC.record_family_event("second", "assign", sig=self.SIG)
+        self.assertEqual(PC.fold_families()["scopes"], {},
+                         "a claim boundary must not travel to a new family")
+
+    def test_cross_family_scope_event_is_a_noop_audit_record(self):
+        PC.record_family_event("owner", "assign", sig=self.SIG)
+        PC.record_family_event("stranger", "scope", sig=self.SIG,
+                               target_suffix=".jsonl")
+        self.assertEqual(PC.fold_families()["scopes"], {})
+
+    def test_cli_scope_refuses_an_unassigned_signature(self):
+        env = dict(os.environ, PAPERCUT_STORE=str(self.store))
+        p = subprocess.run(
+            [sys.executable, str(PAPERCUT), "family", "scope", "nobody",
+             "ghost:sig", "--target-suffix", ".jsonl"],
+            capture_output=True, text=True, timeout=30, check=False, env=env)
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertIn("not assigned", p.stderr + p.stdout)
+
+
 class TestFamilyTriage(PapercutBase):
     """Triage prepares local candidate dossiers from rollup's flagged family lane."""
 
