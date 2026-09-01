@@ -1149,6 +1149,31 @@ class TestSignalLineParity(PapercutBase):
             PC.signal_line("Exit code 1\nerror: connection failed...\ndetail"),
             "error: connection failed...")
 
+    def test_a_python_traceback_keys_on_its_exception_line(self):
+        # Same fixture the hook keys on: the header names the shape, the
+        # exception on the LAST line names the cause.
+        text = ('Exit code 1\nTraceback (most recent call last):\n'
+                '  File "<string>", line 1\n'
+                'json.decoder.JSONDecodeError: Expecting value')
+        self.assertEqual(PC.signal_line(text),
+                         "json.decoder.JSONDecodeError: Expecting value")
+
+    def test_a_node_internal_frame_keys_on_its_error_line(self):
+        text = ("Exit code 1\nnode:internal/modules/run_main:107\n"
+                "    triggerUncaughtException(\n    ^\n\n"
+                "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/repo/bin/x.ts'"
+                " imported from /repo/")
+        self.assertEqual(
+            PC.signal_line(text),
+            "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/repo/bin/x.ts'"
+            " imported from /repo/")
+
+    def test_a_node_frame_with_no_error_line_keeps_the_frame(self):
+        self.assertEqual(
+            PC.signal_line("Exit code 1\nnode:internal/process/promises:394\n"
+                           "    triggerUncaughtException("),
+            "node:internal/process/promises:394")
+
     def test_skips_the_exit_code_wrapper(self):
         self.assertEqual(PC.signal_line("Exit code 1\ntsc: type error in foo.ts"),
                          "tsc: type error in foo.ts")

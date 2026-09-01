@@ -229,15 +229,22 @@ _PROGRESS_LINE = re.compile(r"\.\.\.\s*$")
 _ERRORISH = re.compile(
     r"error|warn|fail|fatal|denied|refus|missing|cannot|unable|exception|blocked",
     re.IGNORECASE)
+_TRACEBACK_HDR = re.compile(r"^Traceback \(most recent call last\):$")
+_NODE_INTERNAL_HDR = re.compile(r"^node:internal/")
+_NODE_ERROR_LINE = re.compile(r"^(?:[A-Z][A-Za-z]*)?Error(?:\s*\[[A-Z0-9_]+\])?:")
 
 
 def signal_line(text: str) -> str:
     """First line carrying actual content, skipping the harness's wrapper lines.
 
-    Parity with the hook's signalLine: when the first content line is a bare
-    trailing-ellipsis progress banner ("Checking formatting..."), the key
-    lands on the LAST content line -- banner-first tools summarize at the end
-    -- and `show` must display the line the signature keyed on.
+    Parity with the hook's signalLine, all three branches -- `show` must
+    display the line the signature keyed on. A bare trailing-ellipsis progress
+    banner ("Checking formatting...") defers to the LAST content line
+    (banner-first tools summarize at the end); a Python traceback header
+    defers to the last line (the exception itself); a node:internal frame
+    defers to the first Error-shaped line below it. Implementing only the
+    banner branch made `show` display the frame/header for records the hook
+    keyed on the real error (caught dogfooding, 2026-09-01).
     """
     lines = str(text).split("\n")
     content = [ln.strip() for ln in lines
@@ -247,6 +254,12 @@ def signal_line(text: str) -> str:
         if (len(content) > 1 and _PROGRESS_LINE.search(first)
                 and not _ERRORISH.search(first)):
             return content[-1]
+        if _TRACEBACK_HDR.match(first):
+            return content[-1]
+        if _NODE_INTERNAL_HDR.match(first):
+            for ln in content:
+                if _NODE_ERROR_LINE.match(ln):
+                    return ln
         return first
     for ln in lines:
         if ln.strip():
