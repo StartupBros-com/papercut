@@ -223,6 +223,10 @@ KNOWN_GUARDS: tuple[str, ...] = ()
 WRAPPER_LINE = re.compile(
     r"^\s*(?:exit code\s*\d+|command failed(?: with exit code \d+)?|error)\s*[:.]?\s*$", re.I
 )
+# Claude Code's injected `<claude-code-hint ... />` suggestion tags are harness
+# metadata ahead of the real output, same class as the exit-code wrapper (68
+# records keyed on the vercel plugin hint, 2026-09-01). Any hint type matches.
+HINT_LINE = re.compile(r"^\s*<claude-code-hint\b.*/>\s*$")
 
 
 _PROGRESS_LINE = re.compile(r"\.\.\.\s*$")
@@ -248,7 +252,8 @@ def signal_line(text: str) -> str:
     """
     lines = str(text).split("\n")
     content = [ln.strip() for ln in lines
-               if ln.strip() and not WRAPPER_LINE.match(ln)]
+               if ln.strip() and not WRAPPER_LINE.match(ln)
+               and not HINT_LINE.match(ln)]
     if content:
         first = content[0]
         if (len(content) > 1 and _PROGRESS_LINE.search(first)

@@ -1174,6 +1174,17 @@ class TestSignalLineParity(PapercutBase):
                            "    triggerUncaughtException("),
             "node:internal/process/promises:394")
 
+    def test_skips_an_injected_claude_code_hint_line(self):
+        # Harness metadata, same class as the exit-code wrapper: show must
+        # surface the real cause under it, not the hint.
+        text = ('Exit code 1\n'
+                '<claude-code-hint v="1" type="plugin"'
+                ' value="vercel@claude-plugins-official" />\n'
+                "Error: Your codebase isn't linked to a project on Vercel.")
+        self.assertEqual(
+            PC.signal_line(text),
+            "Error: Your codebase isn't linked to a project on Vercel.")
+
     def test_skips_the_exit_code_wrapper(self):
         self.assertEqual(PC.signal_line("Exit code 1\ntsc: type error in foo.ts"),
                          "tsc: type error in foo.ts")

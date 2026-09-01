@@ -142,6 +142,16 @@ function normalize(s) {
 // it crossed the rollup threshold on day one. The signal is on line 2+.
 const WRAPPER_LINE = /^\s*(?:exit code\s*\d+|command failed(?: with exit code \d+)?|error)\s*[:.]?\s*$/i;
 
+// Claude Code also injects `<claude-code-hint ... />` suggestion tags (plugin
+// recommendations and the like) ahead of a failure's real output. Same class
+// as the exit-code wrapper: harness metadata, never the failure's content —
+// measured 2026-09-01, 68 records across 10+ sessions keyed on the vercel
+// plugin hint while the actual causes (`unknown option: --format`, `codebase
+// isn't linked`, usage banners) sat one line below, each a distinct fixable
+// cluster. Matched broadly (any hint type) so future hint kinds cannot mask
+// causes either.
+const HINT_LINE = /^\s*<claude-code-hint\b.*\/>\s*$/;
+
 // A bare traceback header is as content-free as the exit-code wrapper: measured
 // 2026-08-06, `bash:traceback (most recent call last):` collapsed 265 occurrences
 // across 105 sessions — JSONDecodeError, TypeError, KeyError, AttributeError,
@@ -173,7 +183,7 @@ const ERRORISH = /error|warn|fail|fatal|denied|refus|missing|cannot|unable|excep
 /** First line carrying actual content, skipping the harness's own wrapper lines. */
 function signalLine(text) {
   const lines = String(text).split('\n');
-  const content = lines.filter((l) => l.trim() && !WRAPPER_LINE.test(l));
+  const content = lines.filter((l) => l.trim() && !WRAPPER_LINE.test(l) && !HINT_LINE.test(l));
   let real = content[0];
   if (real !== undefined && content.length > 1
       && PROGRESS_LINE.test(real) && !ERRORISH.test(real)) {
@@ -195,7 +205,7 @@ function signalLine(text) {
 
 /** True when a Bash failure carried nothing but the tool's own exit-code line. */
 function isContentFree(text) {
-  return !String(text).split('\n').some((l) => l.trim() && !WRAPPER_LINE.test(l));
+  return !String(text).split('\n').some((l) => l.trim() && !WRAPPER_LINE.test(l) && !HINT_LINE.test(l));
 }
 
 // The old subject capture required the path to be followed only by whitespace
