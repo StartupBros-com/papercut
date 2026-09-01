@@ -1,6 +1,6 @@
 {
   "name": "papercut",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Capture the small frictions agents route around silently, then mine them into ranked, tracked fixes. A PostToolUseFailure hook records hard tool failures automatically; a stdlib-only CLI ranks them by how many distinct sessions hit each one, folds related signatures into causal families, and carries one family at a time through an evidence dossier into a filed work item -- with a verification stage that refuses to call a fix verified on silence alone.",
   "author": {
     "name": "StartupBros / House of Vibe",
