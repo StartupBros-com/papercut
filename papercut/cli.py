@@ -65,7 +65,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-STORE = Path(os.environ.get("PAPERCUT_STORE", Path.home() / ".claude" / "papercuts"))
+# Resolution order shared with the hook's storeDir() (an earlier change completed):
+# PAPERCUT_STORE, then CLAUDE_CONFIG_DIR/papercuts, then ~/.claude/papercuts.
+# Before this line, BOTH sides defaulted straight to the home store and
+# CLAUDE_CONFIG_DIR never isolated papercut state; the an earlier change hook-only change
+# then briefly made the two disagree under an override — caught by the
+# packaged-copy verification, fixed here by giving the CLI the same order.
+STORE = Path(
+    os.environ.get("PAPERCUT_STORE")
+    or Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser() / "papercuts"
+)
 MAX_RECORD_BYTES = 3072  # keep parity with the hook's atomic-append cap
 MAX_LOG_BYTES = 32 * 1024 * 1024  # mirrors the hook's per-store cap (writes stop silently there)
 ISSUE_LABEL = "papercut"

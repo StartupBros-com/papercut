@@ -121,6 +121,43 @@ class TestRank(PapercutBase):
         self.assertTrue(all("\n" not in s for s in entry["samples"]))
 
 
+class TestStoreResolution(PapercutBase):
+    """One resolution order, both sides: PAPERCUT_STORE, then
+    CLAUDE_CONFIG_DIR/papercuts, then home. The hook's parity test pins the
+    JS side; this pins the CLI via subprocess (STORE binds at import, so
+    in-process rebinding cannot exercise it)."""
+
+    def cli(self, env_extra, *args):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PAPERCUT_STORE", "CLAUDE_CONFIG_DIR")}
+        env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, str(PAPERCUT), *args],
+            capture_output=True, text=True, timeout=30, check=False, env=env)
+
+    def test_claude_config_dir_isolates_the_store(self):
+        cfg = self.mkdtemp()
+        p = self.cli({"CLAUDE_CONFIG_DIR": cfg}, "add", "-m", "isolated", "--cwd", "/tmp/x")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((Path(cfg) / "papercuts" / "-tmp-x.jsonl").exists(),
+                        "record must land under the overridden config dir")
+
+    def test_papercut_store_wins_over_config_dir(self):
+        cfg, store = self.mkdtemp(), self.mkdtemp()
+        p = self.cli({"CLAUDE_CONFIG_DIR": cfg, "PAPERCUT_STORE": store},
+                     "add", "-m", "override wins", "--cwd", "/tmp/x")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((Path(store) / "-tmp-x.jsonl").exists(),
+                        "PAPERCUT_STORE must take precedence")
+        self.assertFalse((Path(cfg) / "papercuts").exists(),
+                         "nothing may land under the config dir when the store is overridden")
+
+    def mkdtemp(self):
+        d = tempfile.mkdtemp(prefix="pc-storeres-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+
 class TestAddCommand(PapercutBase):
     def run_cli(self, *argv, cwd=None):
         # CLAUDE_CODE_SESSION_ID is the real variable and leaks in from the
