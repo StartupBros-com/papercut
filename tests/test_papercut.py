@@ -340,6 +340,20 @@ class TestSynthesizedIdentityFixtureLane(PapercutBase):
         self.assertEqual(PC.fixture_rule(self.rec_for(session="ppid-318283")),
                          "hook-test-synthesized-identity")
 
+    def test_a_literal_test_session_is_synthesized_too(self):
+        # Measured 2026-09-02: a harness-vet suite handed the hook the literal
+        # session id `test` from a /tmp scratch repo -- 796 a-vcs-guard records in
+        # one day, 43% of everything the hyphen-only rule let through. A real
+        # session is the last 8 hex characters of a UUID; anything else was
+        # invented by whoever called the hook.
+        self.assertEqual(
+            PC.fixture_rule(self.rec_for(session="test", cwd="/tmp/hv-848-vet-2/scratch-repo")),
+            "hook-test-synthesized-identity")
+        # Planted negative: a real session id at the same /tmp cwd keeps counting
+        # (the rule stays conjunctive).
+        self.assertIsNone(PC.fixture_rule(
+            self.rec_for(session="cda2bb6d", cwd="/tmp/hv-848-vet-2/scratch-repo")))
+
     def test_the_rollup_reports_synthetic_records_that_still_rank(self):
         """The tripwire for a fixture rule that stops matching.
 
