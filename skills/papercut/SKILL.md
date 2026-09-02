@@ -310,7 +310,7 @@ papercut family show <family> --window 60   # widen the verification window
 |---|---|
 | `regressed` | a member signature recurred after the closure, or a recurrence comment was already posted |
 | `verifying` | the closure is younger than the window; days remaining are printed |
-| `verified` | window elapsed, no recurrence, and capture was demonstrably alive |
+| `verified` | exposure floor crossed after the 7-day minimum (or the window elapsed), no recurrence, and capture was demonstrably alive |
 | `provisional` | window elapsed and quiet, but too little capture happened to conclude anything |
 
 The distinction that makes this worth having is `verified` versus
@@ -321,7 +321,9 @@ closure, and must clear a floor of three sessions or half the equal-length
 pre-closure baseline, whichever is larger. Both measurements and the floor are
 printed, never a bare verdict — including while a family is still `verifying`,
 where the count so far shows whether it is on track to clear the floor or
-heading for `provisional`.
+heading for `provisional`. The verdict arrives as soon as the exposure floor is
+crossed and 7 days have passed, rather than waiting for the full window; the
+30-day window remains the horizon for regressions.
 
 A recurrence counts only when the rollup would act on it. Member signatures
 that are quarantined as junk fingerprints, or that were individually resolved
@@ -349,8 +351,10 @@ Boundary — scoping tighter than the written claim hides real recurrence.
 A remedy that breaks retry loops (a guard that denies the second attempt, a
 hook that rewrites it) never stops the first failure, so its signature keeps
 firing while the fix works; add `--repeats-only` and only the second and
-later occurrences for the same session, agent and target count. Both flags
-combine, and a scope event replaces the whole boundary.
+later occurrences for the same session, agent and target count. When targets
+are shape-coded (`keys:input=object`, `keys:input=json`), `--target-prefix`
+names the class the remedy covers. The flags combine, and a scope event
+replaces the whole boundary.
 
 **Pick member signatures whose silence is the success signal.** Recurrence
 and verification read member records, so a member signature that fires when

@@ -632,9 +632,11 @@ def fold_families(events: list[dict] | None = None) -> dict:
             # repeats-only boundary is a dict so the difference is visible.
             if membership.get(str(sig)) == family:
                 suffix = str(event.get("target_suffix") or "").strip()
+                prefix = str(event.get("target_prefix") or "").strip()
                 repeats_only = bool(event.get("repeats_only"))
-                if repeats_only:
-                    scopes[str(sig)] = {"suffix": suffix, "repeats_only": True}
+                if repeats_only or prefix:
+                    scopes[str(sig)] = {"suffix": suffix, "prefix": prefix,
+                                        "repeats_only": repeats_only}
                 elif suffix:
                     scopes[str(sig)] = suffix
                 else:
@@ -1541,9 +1543,10 @@ def cmd_family_scope(args: argparse.Namespace) -> None:
     if not args.sig:
         family_error("policy refusal: raw signature must not be empty", 3)
     suffix = "" if args.clear else str(args.target_suffix or "").strip()
+    prefix = "" if args.clear else str(getattr(args, "target_prefix", "") or "").strip()
     repeats_only = bool(getattr(args, "repeats_only", False)) and not args.clear
-    if not args.clear and not suffix and not repeats_only:
-        family_error("policy refusal: pass --target-suffix and/or --repeats-only (or --clear)", 3)
+    if not args.clear and not suffix and not prefix and not repeats_only:
+        family_error("policy refusal: pass --target-suffix, --target-prefix and/or --repeats-only (or --clear)", 3)
 
     previous: dict = {}
 
@@ -1561,11 +1564,13 @@ def cmd_family_scope(args: argparse.Namespace) -> None:
         return True
 
     record_family_event(family, "scope", sig=args.sig, target_suffix=suffix,
-                        repeats_only=repeats_only, guard=owns_sig)
+                        target_prefix=prefix, repeats_only=repeats_only, guard=owns_sig)
     if args.clear:
         print(f"family scope cleared: {args.sig} in {family}")
     else:
         parts = []
+        if prefix:
+            parts.append(f"targets starting {prefix}")
         if suffix:
             parts.append(f"targets ending {suffix}")
         if repeats_only:
@@ -1573,8 +1578,10 @@ def cmd_family_scope(args: argparse.Namespace) -> None:
                          "session, agent and target)")
         print(f"family scoped: {args.sig} in {family} -> " + "; ".join(parts))
         old_suffix, old_repeats = scope_parts(previous.get("scope"))
-        if (old_suffix or old_repeats) and (old_suffix, old_repeats) != (suffix, repeats_only):
-            was = "; ".join(p for p in (f"targets ending {old_suffix}" if old_suffix else "",
+        old_prefix = scope_prefix(previous.get("scope"))
+        if (old_suffix or old_prefix or old_repeats) and (old_suffix, old_prefix, old_repeats) != (suffix, prefix, repeats_only):
+            was = "; ".join(p for p in (f"targets starting {old_prefix}" if old_prefix else "",
+                                        f"targets ending {old_suffix}" if old_suffix else "",
                                         "repeats only" if old_repeats else "") if p)
             print(f"  (replaced the previous boundary: {was} -- a scope event sets the whole boundary)")
         print("  (verification and recurrence read only matching targets; the "
@@ -2580,6 +2587,11 @@ def scope_parts(scope) -> tuple[str, bool]:
     return str(scope or ""), False
 
 
+def scope_prefix(scope) -> str:
+    """The target prefix of a folded scope value ('' when unscoped by prefix)."""
+    return str(scope.get("prefix") or "") if isinstance(scope, dict) else ""
+
+
 def repeat_marks(records) -> set[int]:
     """Identities of records that are the second or later occurrence of their
     signature for the same session, agent and target, in time order.
@@ -2636,8 +2648,13 @@ def member_record(members, scopes, record, marks=None) -> bool:
     sig = record.get("sig")
     if sig not in members:
         return False
-    suffix, repeats_only = scope_parts((scopes or {}).get(sig))
-    if suffix and not str(record.get("target") or "").endswith(suffix):
+    scope = (scopes or {}).get(sig)
+    suffix, repeats_only = scope_parts(scope)
+    prefix = scope_prefix(scope)
+    target = str(record.get("target") or "")
+    if suffix and not target.endswith(suffix):
+        return False
+    if prefix and not target.startswith(prefix):
         return False
     if repeats_only and (marks is None or id(record) not in marks):
         return False
@@ -2751,6 +2768,11 @@ def recurrence_details(state: dict) -> dict:
 # moment the fix regressed, and this way a regression is visible the next time
 # anyone looks.
 VERIFY_WINDOW_DAYS = 30
+# The minimum elapsed time before a verdict, covering weekly-cadence recurrences
+# regardless of how fast exposure accrues. The 30-day window stays the horizon for
+# exposure counting and regression reads -- this only gates how early "verified"
+# can fire.
+VERIFY_MIN_DAYS = 7
 # Three sessions is the smallest exposure that distinguishes "nobody hit it" from
 # "nobody was there". Below it, quiet is uninformative at any baseline.
 VERIFY_EXPOSURE_FLOOR = 3
@@ -2891,18 +2913,48 @@ def verification_details(state: dict, members, records,
     # catches a hand-edited or clock-skewed event.
     now = datetime.now(timezone.utc)
     elapsed = max(timedelta(0), now - closed_at)
+
+    # High-traffic families clear the exposure floor in days while the calendar
+    # window still has weeks left -- waiting for the window to lapse anyway makes
+    # the verdict wait on nothing. The floor alone isn't enough of a guard on its
+    # own (a fix landed an hour before a burst of exposure shouldn't verify), so
+    # a verdict also needs VERIFY_MIN_DAYS of elapsed time, long enough to cover a
+    # weekly-cadence recurrence. The window itself remains the horizon for
+    # exposure counting and regression reads either way.
+    exposure_so_far = sessions_between(closed_at, min(now, closed_at + window))
+    if exposure_so_far >= floor and elapsed >= timedelta(days=VERIFY_MIN_DAYS):
+        partial = elapsed < window
+        details["exposure_sessions"] = exposure_so_far
+        details["partial"] = partial
+        details["stage"] = "verified"
+        details["verified_early"] = partial
+        details["days_elapsed"] = int(elapsed.days)
+        return details
+
     if elapsed < window:
-        details["exposure_sessions"] = sessions_between(
-            closed_at, min(now, closed_at + window))
+        details["exposure_sessions"] = exposure_so_far
         details["partial"] = True
         remaining = (window - elapsed).total_seconds() / 86400
         details["stage"] = "verifying"
         details["days_remaining"] = max(1, math.ceil(remaining))
+        if exposure_so_far >= floor:
+            elapsed_days = elapsed.total_seconds() / 86400
+            details["min_days_remaining"] = max(
+                1, math.ceil(VERIFY_MIN_DAYS - elapsed_days))
         return details
 
     exposure = sessions_between(closed_at, closed_at + window)
     details["exposure_sessions"] = exposure
     details["partial"] = False
+    if exposure >= floor and elapsed < timedelta(days=VERIFY_MIN_DAYS):
+        # Only reachable with --window below the minimum: the window is spent
+        # but the minimum is not, and the minimum is not the window's to waive
+        # (refute-vet finding).
+        elapsed_days = elapsed.total_seconds() / 86400
+        details["stage"] = "verifying"
+        details["days_remaining"] = max(1, math.ceil(VERIFY_MIN_DAYS - elapsed_days))
+        details["min_days_remaining"] = details["days_remaining"]
+        return details
     details["stage"] = "verified" if exposure >= floor else "provisional"
     return details
 
@@ -2927,9 +2979,19 @@ def verification_summary(details: dict) -> str:
                 f"session(s) vs floor {details['floor']} "
                 f"(pre-closure baseline {details['baseline_sessions']})")
     if stage == "verifying":
-        return (f"verifying — {details['days_remaining']} day(s) remaining "
+        line = (f"verifying — {details['days_remaining']} day(s) remaining "
                 f"before the fix can be judged; {measures} so far")
+        min_days_remaining = details.get("min_days_remaining")
+        if min_days_remaining is not None:
+            line += (f"; floor crossed, {min_days_remaining} day(s) until the "
+                    f"7-day minimum")
+        return line
     if stage == "verified":
+        if details.get("verified_early"):
+            return (f"verified — exposure {details['exposure_sessions']} "
+                    f"store-wide capture session(s) crossed floor {details['floor']} "
+                    f"after {details['days_elapsed']} day(s) (7-day minimum met; "
+                    f"regression reads continue to the window's end)")
         return (f"verified — no member recurrence, {measures}; store-wide "
                 f"liveness only, the fixed mechanism itself was not measured")
     return (f"provisional — quiet, but only {measures}; "
@@ -3701,6 +3763,7 @@ _OVERRIDABLE = (
     "KNOWN_GUARDS",
     "GH_LIST_LIMIT",
     "VERIFY_WINDOW_DAYS",
+    "VERIFY_MIN_DAYS",
     "VERIFY_EXPOSURE_FLOOR",
     "TRIAGE_UNFAMILIED_LIMIT",
     "DOSSIER_PROJECT_CAP",
@@ -3865,6 +3928,9 @@ def main() -> None:
     fsc.add_argument("family")
     fsc.add_argument("sig")
     fsc.add_argument("--target-suffix", help="count only records whose target ends with this")
+    fsc.add_argument("--target-prefix",
+                     help="count only records whose target starts with this (shape-coded "
+                          "targets such as keys:input= name a class of failures)")
     fsc.add_argument("--repeats-only", action="store_true",
                      help="count only the second and later occurrences for the same "
                           "session, agent and target (a loop-breaking remedy's claim)")
