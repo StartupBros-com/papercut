@@ -30,10 +30,15 @@ to turn the pile into fixes:
 | File | One family at a time carries an evidence dossier into a filed, tracked work item |
 | Verify | A fix only reads **verified** after enough real traffic has passed to make silence meaningful |
 
-> **Verification status, stated exactly:** the refuse-verified-on-silence rule
-> is enforced by tests; regression detection has fired on live data; the first
-> positive verified-fix cycle is in progress in the source harness (exposure
-> 71/187 at publication, window completing 2026-09-28).
+> **Verification status, stated exactly (2026-09-01):** the refuse-verified-on-silence
+> rule is enforced by tests, and regression detection has fired on live data three
+> times. Of five adopted fixes in the source harness, none has completed a
+> verification window yet: one is mid-window (exposure 158/187, completing
+> 2026-09-28); two regressed genuinely and were re-diagnosed on their tracking
+> issues; one read `regressed` on a single pre-fix-version invocation, which is
+> why a regressed read now names its first post-closure record; one work item is
+> still open by design. This paragraph is updated every release. The tool does
+> not claim a fix it has not witnessed.
 
 ## Quick example
 

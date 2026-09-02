@@ -2352,6 +2352,67 @@ class TestVerificationLifecycle(PapercutBase):
         self.assertEqual(details["stage"], "regressed")
         self.assertTrue(PC.has_new_recurrence(state, {"member"}, records))
 
+    def test_a_regressed_read_names_its_first_post_closure_record(self):
+        """A bare 'regressed' cost a multi-command dig to learn WHICH record
+        tripped it (2026-09-01: one pre-fix plugin-version invocation). The
+        stage carries the earliest post-boundary member record so the read is
+        checkable in place."""
+        self.assign("broke-again", "member")
+        self.adopt("broke-again")
+        self.close("broke-again", days_ago=3)
+        later = self.rec(sig="member", days_ago=1, session="s2", cwd="/srv/app-b")
+        earlier = self.rec(sig="member", days_ago=2, session="s1", cwd="/srv/app-a")
+        self.write("-p", [later, earlier])
+
+        state = PC.fold_families()["adoption"]["broke-again"]
+        details = PC.verification_details(state, {"member"}, list(PC.read_records(90)),
+                                          window_days=30)
+        self.assertEqual(details["stage"], "regressed")
+        self.assertEqual(details["first_recurrence"]["ts"], earlier["ts"])
+        self.assertEqual(details["first_recurrence"]["project"],
+                         PC.project_slug("/srv/app-a"))
+        summary = PC.verification_summary(details)
+        self.assertIn(earlier["ts"], summary)
+        self.assertIn(PC.project_slug("/srv/app-a"), summary)
+        self.assertIn("(member)", summary)
+        self.assertNotIn(later["ts"], summary)
+        self.assertIn(earlier["ts"], self.show("broke-again"))
+
+    def test_a_regressed_read_from_the_comment_alone_says_its_records_aged_out(self):
+        self.assign("comment-only", "member")
+        self.adopt("comment-only")
+        self.close("comment-only", days_ago=40)
+        # A PRE-closure member record makes the scan actually run, so the
+        # None below proves exclusion rather than an empty store.
+        self.write("-p", [self.rec(sig="member", days_ago=45, session="old",
+                                   cwd="/srv/app-a")])
+        PC.record_family_event(
+            "comment-only", "recur-comment",
+            locator={"repo": "o/r", "kind": "issue", "number": 17,
+                     "url": "https://example.test/o/r/issues/17"},
+            sessions=3, count=5,
+        )
+        state = PC.fold_families()["adoption"]["comment-only"]
+        details = PC.verification_details(state, {"member"}, list(PC.read_records(90)),
+                                          window_days=30)
+        self.assertEqual(details["stage"], "regressed")
+        self.assertIsNone(details["first_recurrence"])
+        self.assertIsNotNone(details["recur_comment_at"])
+        self.assertIn("aged out", PC.verification_summary(details))
+
+    def test_family_show_explains_an_absent_verification_stage(self):
+        """Silence read as 'not yet' when it meant 'never': only an adopted
+        family carries a claim, and only a closed observation starts its clock."""
+        self.assign("unadopted", "member")
+        out = self.show("unadopted")
+        self.assertIn("verification: none", out)
+        self.assertIn("only an adopted family", out)
+        self.adopt("unadopted")
+        out = self.show("unadopted")
+        self.assertIn("no closed observation yet", out)
+        self.close("unadopted", days_ago=1)
+        self.assertIn("verification (window", self.show("unadopted"))
+
     def test_a_recur_comment_outlasts_the_records_that_caused_it(self):
         """Records age out of the read horizon; the recur-comment event is the
         durable evidence that the fix did not hold. A family that regressed

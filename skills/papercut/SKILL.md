@@ -267,6 +267,14 @@ disposition, recurrence and the open-work cap all read that locator back. A
 `--state open` observation ends the disposition epoch, so a later close starts
 a fresh one.
 
+The closed observation is the verification boundary, so observe it when the
+fix *reaches the sessions that produce records*, not when the PR merges. For
+a fix that ships through a release or plugin version, wait for the release
+and pass `--observed-at <its published time>`. Sessions still running an
+older version count as recurrence regardless — a `regressed` read names its
+first post-closure record so that case is recognisable — and the dossier's
+No-Claim Boundary should say so up front.
+
 Once a family is closed upstream and member signatures keep arriving, that is a
 recurrence: the remedy did not hold. `rollup --apply` and `recur-comment` share
 one decision, so neither comments unless a member record postdates both the
@@ -359,9 +367,11 @@ pretending otherwise manufactures a permanent false `regressed`.
 - delete-when — its draft is deleted when the family is adopted (the body lives in the filed item) or disposed (the verdict event carries the digest, plus a redacted copy of the body for reopen). Adopt and dispose each delete only after their own event is durably appended, so a crash loses the draft only once the record that replaces it is safe.
 
 `a weekly scheduled run` invokes `$HOME/.claude/bin/papercut.py`, not a worktree
-copy. The clinic is not live for the weekly report or for an ambient
-`papercut` invocation until `your config sync push` installs it — so run it from a
-worktree as `python3 claude/bin/papercut.py` until then.
+copy, and that path is a symlink into the canonical main checkout. The clinic
+is not live for the weekly report or for an ambient `papercut` invocation
+until that checkout pulls the merge — the weekly report only ever reads the
+installed copy — so run it from a worktree as `python3 claude/bin/papercut.py`
+until then.
 
 ## Mining a whole session
 
