@@ -325,9 +325,25 @@ function toolTarget(toolInput) {
 // validator's "missing property" text. Recording `keys:name=shape,...`
 // (sorted, values dropped) makes each class rankable, scopeable and measurable
 // without another transcript dig.
+// A string that is JSON of an object is its own class: a fleet of 14 agents
+// (2026-09-02) each sent `{input: "<JSON of the object>"}` once, which the
+// plain `string` shape would have filed with prose. Shape only, never content.
+function jsonObjectString(v) {
+  if (typeof v !== 'string') return false;
+  const text = v.trim();
+  if (!text.startsWith('{')) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
 function valueShape(v) {
   if (Array.isArray(v)) return 'array';
   if (v === null) return 'null';
+  if (jsonObjectString(v)) return 'json';
   return typeof v === 'object' ? 'object' : typeof v;
 }
 
@@ -353,14 +369,23 @@ function structuredOutputHint(input) {
   if (!SCHEMA_MISMATCH.test(err)) return null;
   const sent = input.tool_input;
   if (!sent || typeof sent !== 'object' || Array.isArray(sent)) return null;
-  const keys = Object.keys(sent);
+  const keys = Object.keys(sent).sort();
   const missing = [];
   let m;
   while ((m = MISSING_PROP.exec(err)) !== null) missing.push(m[1]);
   MISSING_PROP.lastIndex = 0;
-  if (keys.length !== 1 || missing.length === 0) return null;
-  const only = keys[0];
-  const inner = sent[only];
+  if (missing.length === 0) return null;
+  // `{input}`, or the tool-call envelope `{name, input}`: both wrap the object.
+  const envelope = keys.length === 2 && keys[0] === 'input' && keys[1] === 'name';
+  if (keys.length !== 1 && !envelope) return null;
+  const only = envelope ? 'input' : keys[0];
+  let inner = sent[only];
+  if (jsonObjectString(inner)) {
+    const innerKeys = Object.keys(JSON.parse(inner.trim()));
+    return ('The object was JSON-encoded as a string under a top-level `' + only + '` key; '
+      + 'the tool\'s parameters are the object itself, so the same content as an object with '
+      + innerKeys.slice(0, 12).join(', ') + ' at the top level is what validates.');
+  }
   if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
     const innerKeys = Object.keys(inner);
     // Informational phrasing only: imperative additionalContext has measurably

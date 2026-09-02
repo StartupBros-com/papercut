@@ -38,11 +38,25 @@ const SCHEMA_MISMATCH = /output does not match required schema/i;
 const MISSING_PROP = /must have required property '([^']+)'/g;
 const TAIL_BYTES = 1024 * 1024;
 
+/**
+ * The object an agent wrapped, or null. Three wrapper spellings are live
+ * (measured 2026-09-02 from the sent key-shapes the capture hook records):
+ * `{input: {...}}`, `{input: "<JSON of the object>"}` (a fleet of 14 agents in
+ * one workflow, one wasted regeneration each), and the tool-call envelope
+ * `{name, input}`. Prose under `input` is not a wrapper and stays untouched.
+ */
 function loneInputObject(toolInput) {
   if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) return null;
-  const keys = Object.keys(toolInput);
-  if (keys.length !== 1 || keys[0] !== 'input') return null;
-  const inner = toolInput.input;
+  const keys = Object.keys(toolInput).sort();
+  const lone = keys.length === 1 && keys[0] === 'input';
+  const envelope = keys.length === 2 && keys[0] === 'input' && keys[1] === 'name';
+  if (!lone && !envelope) return null;
+  let inner = toolInput.input;
+  if (typeof inner === 'string') {
+    const text = inner.trim();
+    if (!text.startsWith('{')) return null;
+    try { inner = JSON.parse(text); } catch { return null; }
+  }
   if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return null;
   return inner;
 }
@@ -169,7 +183,8 @@ function run(rawInput) {
 
     return rewrite(inner,
       'StructuredOutput call unwrapped: the previous attempt sent the same object nested under a '
-      + 'top-level `input` key and failed naming ' + missing.slice(0, 8).join(', ')
+      + 'top-level `input` key (as an object, a JSON string, or a {name, input} envelope) and '
+      + 'failed naming ' + missing.slice(0, 8).join(', ')
       + '; the tool\'s parameters are the object itself.');
   } catch {
     // Invalid JSON or unexpected shape -- pass through (fail-open).

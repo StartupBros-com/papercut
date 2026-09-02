@@ -1220,6 +1220,17 @@ _FIXTURE_HOOK_TEST_CWD = re.compile(r"^/tmp/|/claude(?:/hooks)?$")
 # work in a directory that does not exist.
 _FIXTURE_DEMO_CWD = re.compile(r"^/home/user/SITES/demo(?:/|$)")
 
+# A fourth shape (measured 2026-09-02): a guard denial whose COMMAND changes
+# into a scratch repository under /tmp before touching git. The session and
+# cwd are real, so neither conjunctive rule above fires, yet the work is a
+# throwaway sandbox -- a harness-vet fixture ran `cd /tmp/hv-848-vet-2/
+# scratch-repo && git add -A && git commit ...` 1,000 times in one day, which
+# was 53% of every a-vcs-guard denial in the window and would have ranked as
+# the fleet's top friction. The guard's doctrine still applied to each one;
+# what makes them fixtures is where the command works, which only the
+# command itself says.
+_FIXTURE_SCRATCH_CMD = re.compile(r"^\s*cd\s+/tmp/\S+")
+
 
 def synthesized_identity(rec: dict) -> bool:
     """True when the record's session was invented rather than supplied.
@@ -1249,6 +1260,9 @@ def fixture_rule(rec: dict) -> str | None:
     if (sig.startswith("guard_blocked:")
             and _FIXTURE_DEMO_CWD.match(str(rec.get("cwd") or ""))):
         return "guard-suite-demo-cwd"
+    if (sig.startswith("guard_blocked:")
+            and _FIXTURE_SCRATCH_CMD.match(str(rec.get("cmd") or ""))):
+        return "guard-scratch-sandbox-cmd"
     if sig != _FIXTURE_GUARD_SIG:
         return None
     if _FIXTURE_CWD.search(str(rec.get("cwd") or "")):

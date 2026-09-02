@@ -433,6 +433,25 @@ class TestSynthesizedIdentityFixtureLane(PapercutBase):
             {"sig": "guard_blocked:a-vcs-guard",
              "cwd": "/home/user/SITES/demo-app", "session": "cda2bb6d"}))
 
+    def test_a_guard_denial_whose_command_works_in_a_tmp_scratch_repo_is_dropped(self):
+        # Measured 2026-09-02: one harness-vet fixture ran `cd /tmp/hv-848-vet-2/
+        # scratch-repo && git add -A && git commit ...` 1,000 times in a day --
+        # real session, real worktree cwd, so neither conjunctive rule fires --
+        # and it was 53% of every a-vcs-guard denial in the window.
+        self.assertEqual(
+            PC.fixture_rule({"sig": "guard_blocked:a-vcs-guard", "cwd": self.REAL_CWD,
+                             "session": "cda2bb6d",
+                             "cmd": "cd /tmp/hv-848-vet-2/scratch-repo && git add -A && git commit -q -F -"}),
+            "guard-scratch-sandbox-cmd")
+        # Planted negatives: the same command under a non-guard signature is
+        # ordinary telemetry, and a cd into a real project keeps counting.
+        self.assertIsNone(PC.fixture_rule(
+            {"sig": "bash:exit code <n>", "cwd": self.REAL_CWD, "session": "cda2bb6d",
+             "cmd": "cd /tmp/hv-848-vet-2/scratch-repo && git add -A"}))
+        self.assertIsNone(PC.fixture_rule(
+            {"sig": "guard_blocked:a-vcs-guard", "cwd": self.REAL_CWD, "session": "cda2bb6d",
+             "cmd": "cd /home/user/SITES/example-project && git add -A"}))
+
     def test_non_guard_telemetry_at_the_demo_cwd_keeps_counting(self):
         # Planted negative: scope is guard_blocked:* -- ordinary friction
         # recorded with that cwd stays out of the fixture lane (the voluntary
