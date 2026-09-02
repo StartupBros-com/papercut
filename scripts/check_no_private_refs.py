@@ -47,6 +47,7 @@ LITERALS: list[tuple[str, str, bool]] = [
     ("private-tool", "cass", True),
     ("private-project", "pi-evals", True),
     ("private-project", "prbot", True),
+    ("private-project", "pushbot", True),
     ("private-project", "blog-writer", True),
     ("private-harness-script", "sync.sh", True),
     ("private-harness-script", "wt-new.sh", True),

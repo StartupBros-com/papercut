@@ -29,7 +29,10 @@
  * way before it feeds the halving and the prediction. The denial spells
  * out the literal Read calls that cover the remainder (three agents once
  * answered "limit 475" with 4750) and, from the third denial for the same
- * file, says which denial this is. Denying rather than rewriting is
+ * file, says which denial this is; after three ignored denials the next
+ * oversize call runs at the window instead (offset kept, its own store
+ * signature), because content with visible line numbers beats a fourth
+ * refusal for a caller that never adapts. Denying rather than rewriting is
  * deliberate: a limited Read returns numbered lines and nothing else, so a
  * silently clamped window hands the model a partial file it cannot tell is
  * partial, while a denial's reason is shown to the model and its own next
@@ -74,6 +77,14 @@ const COUNT_LINES_UP_TO = 8 * 1024 * 1024;
 // Literal calls listed in a denial (the rest is "then continue").
 const MAX_CHUNKS_LISTED = 4;
 const DENY_SIG = 'guard_blocked:read-ceiling-chunk';
+// After this many denials for the same caller and file, the next oversize
+// call runs at the window instead of being denied again. Measured
+// 2026-09-02: 226 denials across four GPT-routed sessions, runs of twelve
+// identical refusals, one session 191 deep -- the caller never adapts, and
+// content with visible line numbers beats a thirteenth refusal. The floor
+// and the pass-through rules are unchanged; only the fourth-plus oversize
+// call is rewritten, and it is recorded under its own signature.
+const DENIALS_BEFORE_REWRITE = 3;
 
 function windowOf(value) {
   const n = Number(value);
@@ -195,6 +206,23 @@ function deny(reason, input, ti) {
   });
 }
 
+/** Run the call at the window: the caller has ignored the denial enough times. */
+function rewriteAtWindow(reason, input, ti, limit) {
+  try {
+    logDenial({
+      guard: 'read-ceiling-rewrite', tool: 'Read', command: ti.file_path,
+      reason, sessionId: input.session_id, agentId: input.agent_id, cwd: input.cwd,
+    });
+  } catch { /* counting is optional; the decision is not */ }
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecisionReason: reason,
+      updatedInput: { ...ti, limit },
+    },
+  });
+}
+
 /**
  * @param {string} rawInput - JSON string from Claude Code stdin
  * @returns {string} JSON response or pass-through
@@ -271,9 +299,15 @@ function run(rawInput) {
       + chunks.join(' then ')
       + (left !== null && left <= 0 ? ' (that covers the rest of the file).'
         : ', then continue from offset ' + (o) + '.');
+    if (denials >= DENIALS_BEFORE_REWRITE) {
+      return rewriteAtWindow('Read run at the window after ' + denials + ' ignored denials: asked for '
+        + asked + ' lines from offset ' + start + ', ran with limit ' + limit + '. File: ' + ti.file_path
+        + '.', input, ti, limit);
+    }
     const repeat = denials >= 2
       ? ' This is denial ' + (denials + 1) + ' for this file: each call so far asked for more than the '
-        + 'window; only a call at or under ' + limit + ' lines runs.'
+        + 'window; only a call at or under ' + limit + ' lines runs, and the next call above it will '
+        + 'run at ' + limit + ' lines.'
       : '';
     // The numbers lead: the model reads them first, and the stored denial
     // record keeps only the first 400 characters (a long path used to push
