@@ -316,6 +316,69 @@ function toolTarget(toolInput) {
   return '';
 }
 
+// A StructuredOutput failure's subject is the SHAPE the agent sent, never its
+// values: pairing 109 schema-mismatch results with their tool_use in 3 days of
+// transcripts (measured 2026-09-01) showed the largest class was the whole
+// object wrapped under one top-level `input` key (16 retries in one session,
+// same shape every time), then prose under a single key, then one omitted
+// field. None of that was readable from the store, which held only the
+// validator's "missing property" text. Recording `keys:name=shape,...`
+// (sorted, values dropped) makes each class rankable, scopeable and measurable
+// without another transcript dig.
+function valueShape(v) {
+  if (Array.isArray(v)) return 'array';
+  if (v === null) return 'null';
+  return typeof v === 'object' ? 'object' : typeof v;
+}
+
+function structuredOutputShape(toolInput) {
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) return 'keys:';
+  const keys = Object.keys(toolInput).sort().slice(0, 12);
+  return 'keys:' + keys.map((k) => `${k.slice(0, 40)}=${valueShape(toolInput[k])}`).join(',');
+}
+
+const SCHEMA_MISMATCH = /output does not match required schema/i;
+const MISSING_PROP = /must have required property '([^']+)'/g;
+
+/**
+ * First-failure hint for the two wrapped shapes: the validator's message says
+ * which properties are missing, which the model reads as "add them" and
+ * regenerates the same wrapper. Naming the wrapper is the one fact the error
+ * text does not carry. Other mismatch shapes (a field genuinely omitted, a
+ * wrong type, an enum) already say exactly what to change: no hint.
+ */
+function structuredOutputHint(input) {
+  if (String(input.tool_name) !== 'StructuredOutput') return null;
+  const err = extractError(input);
+  if (!SCHEMA_MISMATCH.test(err)) return null;
+  const sent = input.tool_input;
+  if (!sent || typeof sent !== 'object' || Array.isArray(sent)) return null;
+  const keys = Object.keys(sent);
+  const missing = [];
+  let m;
+  while ((m = MISSING_PROP.exec(err)) !== null) missing.push(m[1]);
+  MISSING_PROP.lastIndex = 0;
+  if (keys.length !== 1 || missing.length === 0) return null;
+  const only = keys[0];
+  const inner = sent[only];
+  if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+    const innerKeys = Object.keys(inner);
+    // Informational phrasing only: imperative additionalContext has measurably
+    // backfired in this harness (the model narrates the instruction instead of
+    // acting on it), so these state the fact and let the error do the asking.
+    if (missing.every((k) => innerKeys.includes(k))) {
+      return ('The object was wrapped under a top-level `' + only + '` key; the tool\'s '
+        + 'parameters are the object itself, so the same content with '
+        + innerKeys.slice(0, 12).join(', ') + ' at the top level is what validates.');
+    }
+  }
+  if (typeof inner === 'string') {
+    return ('The tool received prose under a single `' + only + '` key; what validates is an '
+      + 'object whose top-level properties are ' + missing.slice(0, 12).join(', ') + '.');
+  }
+  return null;
+}
+
 function record(input) {
   const rawErr = extractError(input);
   if (!rawErr.trim()) return null;
@@ -334,7 +397,9 @@ function record(input) {
   // An allowlist of known target keys, never the whole tool_input: a blob
   // capture would sweep in arguments nobody vetted and grow every record. The
   // value goes through redact() and the same length cap as cmd.
-  const rawTarget = toolTarget(input.tool_input);
+  const rawTarget = String(input.tool_name) === 'StructuredOutput'
+    ? structuredOutputShape(input.tool_input)
+    : toolTarget(input.tool_input);
   if (BENIGN_COMMAND.test(rawCmd) || BENIGN_GIT_QUERY.test(rawCmd)) return null;
 
   // A Bash failure with NOTHING but the tool's own `Exit code N` line carries no
@@ -583,7 +648,8 @@ function run(rawInput) {
   // hint failure falls back to the echo — never a broken session.
   try {
     const hint = readLimitRepeatHint(input, path.join(storeDir(), `${projectSlug(input.cwd)}.jsonl`))
-      || readLimitHint(input);
+      || readLimitHint(input)
+      || structuredOutputHint(input);
     if (hint) {
       return JSON.stringify({
         hookSpecificOutput: {
@@ -600,7 +666,7 @@ function run(rawInput) {
 
 module.exports = {
   run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
-  appendRecord, logDenial, readLimitHint,
+  appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape,
 };
 
 if (require.main === module) {
