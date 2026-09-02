@@ -1237,10 +1237,20 @@ def synthesized_identity(rec: dict) -> bool:
 
     The hook falls back to `ppid-<pid>` when a denial payload carries no
     session_id. Records written before the marker fix store that truncated to
-    its last 8 characters (`ppid-318283` -> `d-318283`); either shape contains
-    a hyphen, which the last 8 hex characters of a real session UUID cannot.
+    its last 8 characters (`ppid-318283` -> `d-318283`). A real session is the
+    last 8 hex characters of a UUID, so anything else -- a hyphen-bearing
+    fallback, or a literal like `test` that a harness suite hands the hook
+    (measured 2026-09-02: 796 a-vcs-guard records in one day, 43% of everything
+    the earlier hyphen rule let through) -- was invented, not supplied.
     """
-    return "-" in str(rec.get("session") or "")
+    session = str(rec.get("session") or "")
+    # An absent session is not evidence either way (older records and the
+    # route-guard fixtures carry none); only a PRESENT id that cannot be the
+    # tail of a UUID was invented.
+    return bool(session) and _REAL_SESSION.fullmatch(session) is None
+
+
+_REAL_SESSION = re.compile(r"[0-9a-f]{8}")
 
 
 def fixture_rule(rec: dict) -> str | None:

@@ -267,7 +267,14 @@ function signature(err, toolName, target) {
     return 'no_such_file';
   }
   if (/Permission denied|EACCES/.test(e)) return 'permission_denied';
-  if ((m = e.match(/already (?:exists|used by worktree)/i))) return `worktree_collision:${normalize(m[0])}`;
+  // git's own phrasings only: `fatal: '<path>' already exists` (worktree add),
+  // `fatal: '<branch>' is already used by worktree at ...`, `a branch named
+  // '<x>' already exists`. The bare phrase "already exists" swept in pgtap
+  // output, node experimental warnings and a support test (measured
+  // 2026-09-02: eight unrelated first lines under one key in a day).
+  if ((m = e.match(/(?:fatal:\s*)?(?:'[^']+'|a branch named '[^']+')\s+(?:is )?already (?:exists|used by worktree)/i))) {
+    return `worktree_collision:${normalize(m[0].replace(/'[^']+'/g, '<path>'))}`;
+  }
   // A StructuredOutput schema rejection names the FIRST missing property, which
   // varies per agent prompt — so keying on the message fragmented one failure
   // mode across 52 signatures (122 records, 17 sessions, 49% of all auto-source
@@ -615,7 +622,11 @@ function isTranscriptTarget(target) {
 const REPEAT_THRESHOLD = 3;
 const REPEAT_SCAN_LINES = 300;
 
-function repeatCount(storeFile, session, target, sig) {
+// The caller is (session, agent): a fleet's siblings share a session, and
+// counting by session alone summed their single failures into one agent's
+// "attempt N" (vet finding, 2026-09-02). Records written before the agent
+// field existed carry none and read as the main conversation.
+function repeatCount(storeFile, session, target, sig, agent = '') {
   try {
     const lines = fs.readFileSync(storeFile, 'utf8').split('\n');
     let count = 0;
@@ -623,7 +634,8 @@ function repeatCount(storeFile, session, target, sig) {
       if (!line) continue;
       try {
         const r = JSON.parse(line);
-        if (r.session === session && r.target === target && r.sig === sig) count += 1;
+        if (r.session === session && String(r.agent || '') === agent
+            && r.target === target && r.sig === sig) count += 1;
       } catch { /* skip unparsable line */ }
     }
     return count;
@@ -640,7 +652,8 @@ function readLimitRepeatHint(input, storeFile) {
   if (!target) return null;
   const session = String(input.session_id || '').slice(-8);
   const seen = repeatCount(storeFile, session, target,
-    signature(redact(err.slice(0, MAX_INPUT_CHARS)), input.tool_name, target));
+    signature(redact(err.slice(0, MAX_INPUT_CHARS)), input.tool_name, target),
+    String(input.agent_id || '').slice(-8));
   if (seen < REPEAT_THRESHOLD) return null;
   return ('Attempt ' + seen + ' on this file in this session: it cannot be '
     + 'Read whole. Reading a specific region works: pass offset and limit '
@@ -698,6 +711,7 @@ function run(rawInput) {
 module.exports = {
   run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
   appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape,
+  storeDir,
 };
 
 if (require.main === module) {
