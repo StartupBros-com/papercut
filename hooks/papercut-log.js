@@ -729,6 +729,47 @@ function checkoutOf(prefix, cwd) {
 // from a worktree root.
 const WORKSPACE_ESLINT_ERR = /ESLint couldn't find an eslint\.config\.\(js\|mjs\|cjs\) file/;
 
+// Node's ESM loader, when a test file is run with node directly from the
+// wrong directory or package: `Cannot find package '~'` (a tsconfig path
+// alias, resolved only from the package directory), `Cannot find package
+// 'tsx'` (a tool that is not a dependency of the importing package; pnpm
+// keeps node_modules per package), or `Cannot find module '<path>'` for an
+// extensionless local import. 64 records from 7 sessions in a day; the first
+// version of this hint matched 4 of them because it only knew the word
+// "module" (refute-vet finding).
+const WORKSPACE_ESM_ERR = /\[ERR_MODULE_NOT_FOUND\]: Cannot find (module|package) '([^']+)' imported from (\S+)/;
+const KNOWN_EXT = /\.(?:[cm]?[jt]sx?|json|node|wasm)$/i;
+const TEST_RUN = /--test\b|--import[ =]tsx|tsx\/dist\/cli\.mjs|tsx --test/;
+
+function esmTestHint(input) {
+  const err = extractError(input);
+  const m = err.match(WORKSPACE_ESM_ERR);
+  if (!m) return null;
+  const command = String((input.tool_input && input.tool_input.command) || '');
+  const specifier = m[2];
+  // Only a trailing :line:column is position noise; a digit that ends a
+  // path segment is part of the name (refute-vet finding).
+  const importer = m[3].replace(/(?::\d+){1,2}$/, '');
+  if (specifier === '~' || specifier.startsWith('~/')) {
+    return ('Node could not resolve the `~` path alias from ' + importer + '. tsconfig paths are '
+      + 'discovered from the working directory, so the package\'s own test script run from its '
+      + 'directory (`pnpm --filter <package> test`) resolves it and a `node --test` from the checkout '
+      + 'root does not.');
+  }
+  const bare = !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.startsWith('~');
+  if (bare) {
+    return ('Node could not find the package `' + specifier + '` from ' + importer + ': it is not a '
+      + 'dependency of that package in this checkout (pnpm keeps node_modules per package, and a '
+      + 'worktree does not share the main checkout\'s). A tool such as tsx runs through the package\'s '
+      + 'own scripts (`pnpm --filter <package> test`); a library it imports is added with `pnpm add`.');
+  }
+  const base = specifier.split('/').pop() || '';
+  if (KNOWN_EXT.test(base) || !TEST_RUN.test(command)) return null;
+  return ('Node could not find `' + specifier + '` from ' + importer + '. If that file exists, the '
+    + 'extensionless import resolves only through the package\'s own test script (`pnpm --filter '
+    + '<package> test`), not a direct `node --test`; if it does not, the import itself is wrong.');
+}
+
 function workspaceBinHint(input) {
   const err = extractError(input);
   const cwd = String(input.cwd || '');
@@ -789,7 +830,8 @@ function run(rawInput) {
     const hint = readLimitRepeatHint(input, path.join(storeDir(), `${projectSlug(input.cwd)}.jsonl`))
       || readLimitHint(input)
       || structuredOutputHint(input)
-      || workspaceBinHint(input);
+      || workspaceBinHint(input)
+      || esmTestHint(input);
     if (hint) {
       return JSON.stringify({
         hookSpecificOutput: {
@@ -806,7 +848,7 @@ function run(rawInput) {
 
 module.exports = {
   run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
-  appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape, workspaceBinHint,
+  appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape, workspaceBinHint, esmTestHint,
   storeDir,
 };
 

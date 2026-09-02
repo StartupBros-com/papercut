@@ -2666,11 +2666,13 @@ class TestVerificationLifecycle(PapercutBase):
     def test_the_window_override_is_honored(self):
         self.assign("short-window", "member")
         self.adopt("short-window")
-        self.close("short-window", days_ago=5)
+        # Closed 9 days ago: past the 7-day minimum, which a short --window
+        # cannot waive; the override still sets the exposure and baseline spans.
+        self.close("short-window", days_ago=9)
         # Baseline inside (closure-4d, closure]; exposure inside (closure, closure+4d].
-        self.write("-p", [self.rec(sig="other", days_ago=6, session="b1")])
+        self.write("-p", [self.rec(sig="other", days_ago=10, session="b1")])
         self.write("-p", [self.rec(sig="other", days_ago=d, session=f"p{d}")
-                          for d in (4, 3, 2)])
+                          for d in (8, 7, 6)])
 
         out, status = self.rollup(window=4)
 
@@ -2678,6 +2680,96 @@ class TestVerificationLifecycle(PapercutBase):
         self.assertIn("short-window", out)
         self.assertIn("verified", out)
         self.assertIn("window 4", out)
+
+    def test_a_window_below_the_minimum_cannot_waive_the_minimum(self):
+        # --window 2 spends the window in two days; the 7-day minimum still
+        # holds, so a floor-crossing family reads verifying, not verified.
+        self.assign("short", "member")
+        self.adopt("short")
+        self.close("short", days_ago=3)
+        self.write("-p", [self.rec(sig="other", session=f"s{i}", days_ago=2)
+                          for i in range(4)])
+        details = PC.family_show_data("short", window_days=2)["verification"]
+        self.assertEqual(details["stage"], "verifying")
+        self.assertEqual(details["min_days_remaining"], 4)
+        self.assertNotIn("verified_early", details)
+
+    def test_a_family_verifies_early_once_the_floor_and_minimum_are_both_met(self):
+        """High-traffic families clear the exposure floor in days, not weeks --
+        the verdict must not wait on the full calendar window once both the
+        floor and the 7-day minimum are satisfied."""
+        self.assign("early-verify", "member")
+        self.adopt("early-verify")
+        self.close("early-verify", days_ago=8)
+        self.write("-p", [self.rec(sig="other", days_ago=d, session=f"p{d}")
+                          for d in (6, 4, 2)])
+
+        out, status = self.rollup()
+        state = PC.fold_families()["adoption"]["early-verify"]
+        records = list(PC.read_records(90))
+        details = PC.verification_details(state, {"member"}, records,
+                                          window_days=30)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(details["stage"], "verified")
+        self.assertTrue(details["verified_early"])
+        self.assertTrue(details["partial"])
+        self.assertEqual(details["exposure_sessions"], 3)
+        self.assertEqual(details["days_elapsed"], 8)
+        self.assertIn("early-verify", out)
+        self.assertIn("verified", out)
+        self.assertIn("crossed floor", out)
+        self.assertIn("7-day minimum met", out)
+
+    def test_a_verifying_family_names_days_left_to_the_minimum_once_the_floor_is_crossed(self):
+        self.assign("fast-floor", "member")
+        self.adopt("fast-floor")
+        self.close("fast-floor", days_ago=3)
+        self.write("-p", [self.rec(sig="other", days_ago=d, session=f"p{d}")
+                          for d in (2, 1, 0.2)])
+
+        out, status = self.rollup()
+        state = PC.fold_families()["adoption"]["fast-floor"]
+        records = list(PC.read_records(90))
+        details = PC.verification_details(state, {"member"}, records,
+                                          window_days=30)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(details["stage"], "verifying")
+        self.assertEqual(details["min_days_remaining"], 4)
+        self.assertIn("fast-floor", out)
+        self.assertIn("floor crossed", out)
+
+    def test_a_verifying_family_below_the_floor_has_no_early_minimum_hint(self):
+        self.assign("still-under", "member")
+        self.adopt("still-under")
+        self.close("still-under", days_ago=8)
+
+        state = PC.fold_families()["adoption"]["still-under"]
+        records = list(PC.read_records(90))
+        details = PC.verification_details(state, {"member"}, records,
+                                          window_days=30)
+
+        self.assertEqual(details["stage"], "verifying")
+        self.assertIn("days_remaining", details)
+        self.assertNotIn("min_days_remaining", details)
+
+    def test_a_post_closure_recurrence_still_regresses_past_the_minimum(self):
+        """The floor and the 7-day minimum only govern the verified/verifying
+        split -- an in-claim recurrence still wins even once both are met."""
+        self.assign("still-broken", "member")
+        self.adopt("still-broken")
+        self.close("still-broken", days_ago=8)
+        self.write("-p", [self.rec(sig="other", days_ago=d, session=f"p{d}")
+                          for d in (6, 4, 2)])
+        self.write("-p", [self.rec(sig="member", days_ago=1, session="s1")])
+
+        state = PC.fold_families()["adoption"]["still-broken"]
+        records = list(PC.read_records(90))
+        details = PC.verification_details(state, {"member"}, records,
+                                          window_days=30)
+
+        self.assertEqual(details["stage"], "regressed")
 
 
 class TestClaimScopedVerification(PapercutBase):
@@ -2804,7 +2896,7 @@ class TestClaimScopedVerification(PapercutBase):
         PC.record_family_event("first", "scope", sig=self.SIG,
                                target_suffix=".jsonl", repeats_only=True)
         self.assertEqual(PC.fold_families()["scopes"],
-                         {self.SIG: {"suffix": ".jsonl", "repeats_only": True}})
+                         {self.SIG: {"suffix": ".jsonl", "prefix": "", "repeats_only": True}})
         PC.record_family_event("first", "scope", sig=self.SIG, target_suffix=".jsonl")
         self.assertEqual(PC.fold_families()["scopes"], {self.SIG: ".jsonl"},
                          "a later plain scope replaces the whole boundary")
@@ -2842,6 +2934,31 @@ class TestClaimScopedVerification(PapercutBase):
         self.assertIn("replaced the previous boundary: repeats only", p.stdout)
         self.assertEqual(PC.fold_families()["scopes"], {"loop:sig": ".py"})
 
+    def test_target_prefix_scopes_to_a_class_of_shape_coded_targets(self):
+        # Wrapped StructuredOutput shapes all code as keys:input=...; a
+        # prose-under-one-key loop (keys:summary=string) is outside that claim.
+        self.close("wrapped")
+        PC.record_family_event("wrapped", "scope", sig=self.SIG,
+                               target_prefix="keys:input=", repeats_only=True)
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1, target="keys:summary=string"),
+                          self.rec(sig=self.SIG, session="s1", days_ago=1, target="keys:summary=string")])
+        self.assertEqual(self.stage("wrapped"), "verifying")
+        self.write("-p", [self.rec(sig=self.SIG, session="s2", days_ago=1, target="keys:input=json"),
+                          self.rec(sig=self.SIG, session="s2", days_ago=1, target="keys:input=json")])
+        self.assertEqual(self.stage("wrapped"), "regressed")
+
+    def test_target_prefix_folds_and_prints_with_the_other_boundaries(self):
+        PC.record_family_event("owner", "assign", sig="loop:sig")
+        env = dict(os.environ, PAPERCUT_STORE=str(self.store))
+        p = subprocess.run([sys.executable, str(PAPERCUT), "family", "scope", "owner", "loop:sig",
+                            "--target-prefix", "keys:input=", "--repeats-only"],
+                           capture_output=True, text=True, timeout=30, check=False, env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("targets starting keys:input=", p.stdout)
+        self.assertIn("repeats only", p.stdout)
+        self.assertEqual(PC.fold_families()["scopes"],
+                         {"loop:sig": {"suffix": "", "prefix": "keys:input=", "repeats_only": True}})
+
     def test_cli_scope_accepts_repeats_only_without_a_suffix(self):
         PC.record_family_event("owner", "assign", sig="loop:sig")
         env = dict(os.environ, PAPERCUT_STORE=str(self.store))
@@ -2852,7 +2969,7 @@ class TestClaimScopedVerification(PapercutBase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("repeats only", p.stdout)
         self.assertEqual(PC.fold_families()["scopes"],
-                         {"loop:sig": {"suffix": "", "repeats_only": True}})
+                         {"loop:sig": {"suffix": "", "prefix": "", "repeats_only": True}})
 
     def test_cli_scope_refuses_an_unassigned_signature(self):
         env = dict(os.environ, PAPERCUT_STORE=str(self.store))
