@@ -1720,6 +1720,15 @@ def cmd_family_show(args: argparse.Namespace) -> None:
         if data["verification"]:
             print(f"  verification (window {window}d): "
                   f"{verification_summary(data['verification'])}")
+        # An absent stage used to be silent, and silence read as "not yet" when
+        # it meant "never": only an adopted family carries a claim to verify,
+        # and only a closed observation starts its clock. Say which.
+        elif state["lifecycle"] != "adopted":
+            print("  verification: none — only an adopted family carries a claim "
+                  f"to verify (lifecycle: {state['lifecycle']})")
+        elif state.get("closed_observation") is None:
+            print("  verification: none — no closed observation yet; "
+                  "`papercut rollup --refresh` or `family close-observed` starts the clock")
         return
     if not data["adoption"] and not data["membership"]:
         print("family state: none")
@@ -2723,13 +2732,29 @@ def verification_details(state: dict, members, records,
     # of the read horizon, so a regressed family would otherwise drift quiet and
     # then be promoted for the silence its own regression caused.
     boundary = recurrence_boundary(state)
-    recurred = state.get("recur_comment") is not None or any(
-        member_record(live_members, scopes, record)
-        and newer_than(record.get("ts"), boundary)
-        for record in records
-    )
-    if recurred:
+    # The FIRST post-boundary member record is the diagnosis handle: a bare
+    # "regressed" sent the operator on a multi-command dig to learn which
+    # record tripped it (2026-09-01: one pre-fix plugin-version invocation
+    # read as a regression of a fix that had shipped hours earlier). Naming
+    # its instant, project and signature makes the read checkable in place.
+    first = None
+    first_when = None
+    for record in records:
+        if not (member_record(live_members, scopes, record)
+                and newer_than(record.get("ts"), boundary)):
+            continue
+        when = parse_ts(record.get("ts"))  # newer_than already refused the unparseable
+        if first_when is None or when < first_when:
+            first_when = when
+            first = {"ts": str(record.get("ts")),
+                     "project": project_slug(str(record.get("cwd") or "")),
+                     "sig": str(record.get("sig") or "")}
+    comment = state.get("recur_comment")
+    if first is not None or comment is not None:
         details["stage"] = "regressed"
+        details["first_recurrence"] = first
+        details["recur_comment_at"] = (
+            str(comment.get("ts")) if isinstance(comment, dict) and comment.get("ts") else None)
         return details
 
     def sessions_between(start, end) -> int:
@@ -2782,7 +2807,15 @@ def verification_summary(details: dict) -> str:
     """The stage and the measurements behind it -- never a bare verdict."""
     stage = details["stage"]
     if stage == "regressed":
-        return "regressed — recurred after the work item closed"
+        first = details.get("first_recurrence")
+        if first:
+            return (f"regressed — recurred after the work item closed; first "
+                    f"post-closure record {first['ts']} in {first['project']} "
+                    f"({first['sig']})")
+        at = details.get("recur_comment_at")
+        return ("regressed — recurred after the work item closed; the recurrence "
+                f"comment{' posted ' + at if at else ''} is the durable evidence, "
+                "its records have aged out of the read horizon")
     # Every count is named store-wide on the way out. These sessions attest that
     # capture was alive, NOT that anything exercised this family's mechanism, and
     # an unqualified "exposure 3" next to "verified" reads as the second thing.
