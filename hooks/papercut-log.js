@@ -554,7 +554,7 @@ function appendRecord(cwd, line) {
  * Record a PreToolUse denial. Called by our own guards from their deny paths.
  * Wrapped so any failure here is invisible to the guard's decision.
  */
-function logDenial({ guard, cwd, sessionId, tool, command, reason }) {
+function logDenial({ guard, cwd, sessionId, agentId, tool, command, reason }) {
   try {
     // Truncate BEFORE the regex work — this runs inside a guard's synchronous
     // deny path, where an unbounded input would stall enforcement. See MAX_INPUT_CHARS.
@@ -593,6 +593,8 @@ function logDenial({ guard, cwd, sessionId, tool, command, reason }) {
       cmd: redact(String(command || '').slice(0, MAX_INPUT_CHARS)).slice(0, 200),
       cwd: String(dir || '').slice(0, 200),
       session: sid,
+      // Same 8-char convention as the capture path; empty for the main conversation.
+      agent: String(agentId || '').slice(-8),
       ms: null,
       source: 'guard',
     };
