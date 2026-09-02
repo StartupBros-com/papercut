@@ -626,10 +626,16 @@ def fold_families(events: list[dict] | None = None) -> dict:
         elif action == "scope" and sig:
             # Claim boundary refinement (see member_record): meaningful only
             # for a signature currently assigned to THIS family; anything else
-            # stays a no-op audit record, like a cross-family unassign.
+            # stays a no-op audit record, like a cross-family unassign. A
+            # scope event replaces the whole boundary: a suffix alone stays
+            # the plain string every reader already understands; a
+            # repeats-only boundary is a dict so the difference is visible.
             if membership.get(str(sig)) == family:
                 suffix = str(event.get("target_suffix") or "").strip()
-                if suffix:
+                repeats_only = bool(event.get("repeats_only"))
+                if repeats_only:
+                    scopes[str(sig)] = {"suffix": suffix, "repeats_only": True}
+                elif suffix:
                     scopes[str(sig)] = suffix
                 else:
                     scopes.pop(str(sig), None)
@@ -1535,26 +1541,42 @@ def cmd_family_scope(args: argparse.Namespace) -> None:
     if not args.sig:
         family_error("policy refusal: raw signature must not be empty", 3)
     suffix = "" if args.clear else str(args.target_suffix or "").strip()
-    if not args.clear and not suffix:
-        family_error("policy refusal: --target-suffix must be non-empty (or pass --clear)", 3)
+    repeats_only = bool(getattr(args, "repeats_only", False)) and not args.clear
+    if not args.clear and not suffix and not repeats_only:
+        family_error("policy refusal: pass --target-suffix and/or --repeats-only (or --clear)", 3)
+
+    previous: dict = {}
 
     def owns_sig(_state):
         # Refolding inside the guard mirrors record_family_event's own
         # inside-the-lock fold; membership is checked in the same critical
         # section that appends, so a concurrent unassign cannot race past it.
-        held = fold_families()["membership"].get(args.sig)
+        folded = fold_families()
+        held = folded["membership"].get(args.sig)
         if held != family:
             family_error(
                 f"policy refusal: {args.sig} is not assigned to {family}"
                 + (f" (held by {held})" if held else " (unassigned)"), 3)
+        previous["scope"] = folded["scopes"].get(args.sig)
         return True
 
     record_family_event(family, "scope", sig=args.sig, target_suffix=suffix,
-                        guard=owns_sig)
+                        repeats_only=repeats_only, guard=owns_sig)
     if args.clear:
         print(f"family scope cleared: {args.sig} in {family}")
     else:
-        print(f"family scoped: {args.sig} in {family} -> targets ending {suffix}")
+        parts = []
+        if suffix:
+            parts.append(f"targets ending {suffix}")
+        if repeats_only:
+            parts.append("repeats only (second and later occurrences for the same "
+                         "session, agent and target)")
+        print(f"family scoped: {args.sig} in {family} -> " + "; ".join(parts))
+        old_suffix, old_repeats = scope_parts(previous.get("scope"))
+        if (old_suffix or old_repeats) and (old_suffix, old_repeats) != (suffix, repeats_only):
+            was = "; ".join(p for p in (f"targets ending {old_suffix}" if old_suffix else "",
+                                        "repeats only" if old_repeats else "") if p)
+            print(f"  (replaced the previous boundary: {was} -- a scope event sets the whole boundary)")
         print("  (verification and recurrence read only matching targets; the "
               "ranking keeps full volume. The suffix must match the dossier's "
               "No-Claim Boundary — narrower hides real recurrence.)")
@@ -2551,7 +2573,50 @@ def recurrence_boundary(state: dict) -> str | None:
     return max(parsed, key=lambda pair: pair[0])[1]
 
 
-def member_record(members, scopes, record) -> bool:
+def scope_parts(scope) -> tuple[str, bool]:
+    """(suffix, repeats_only) of a folded scope value, either shape."""
+    if isinstance(scope, dict):
+        return str(scope.get("suffix") or ""), bool(scope.get("repeats_only"))
+    return str(scope or ""), False
+
+
+def repeat_marks(records) -> set[int]:
+    """Identities of records that are the second or later occurrence of their
+    signature for the same session, agent and target, in time order.
+
+    A retry loop is what a loop-breaking remedy changes; the first failure
+    still happens and still teaches the agent. Measured 2026-09-02: the Read
+    ceiling guard denies retries, and structured-output unwrapping rewrites
+    them, yet both families read `regressed` on first failures alone.
+    """
+    seen: dict[tuple, int] = {}
+    marks: set[int] = set()
+    # Parsed order, never raw strings: the hook writes ms+Z and the CLI writes
+    # us+offset, and string order inverts them (refute-vet finding). An
+    # unparseable ts sorts first and never counts as a repeat.
+    def order(r):
+        when = parse_ts(r.get("ts"))
+        return (0, "") if when is None else (1, when.isoformat())
+    ordered = sorted((r for r in records if isinstance(r, dict)), key=order)
+    for record in ordered:
+        subject = str(record.get("target") or record.get("cmd") or "")
+        if not subject or parse_ts(record.get("ts")) is None:
+            # No subject cannot prove a repeat of anything (a third of
+            # auto-capture had none before target keying); fail-closed, and
+            # it seeds no count either.
+            continue
+        key = (record.get("sig"), record.get("session"), record.get("agent") or "", subject)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] >= 2:
+            marks.add(id(record))
+    return marks
+
+
+def needs_repeat_marks(members, scopes) -> bool:
+    return any(scope_parts((scopes or {}).get(sig))[1] for sig in (members or ()))
+
+
+def member_record(members, scopes, record, marks=None) -> bool:
     """Does this record count toward the family's CLAIM?
 
     Membership matches the signature; a scope (when present) further requires
@@ -2563,23 +2628,37 @@ def member_record(members, scopes, record) -> bool:
     Records without a captured target cannot prove they are in scope, so a
     scoped signature does not count them — the same fail-closed posture as
     session-less records in exposure counting.
+
+    A repeats-only boundary further requires the record to be a repeat (see
+    repeat_marks); `marks` is that precomputed set for the record window, and
+    without it a repeats-only signature counts nothing, fail-closed.
     """
     sig = record.get("sig")
     if sig not in members:
         return False
-    suffix = (scopes or {}).get(sig)
-    if not suffix:
-        return True
-    return str(record.get("target") or "").endswith(suffix)
+    suffix, repeats_only = scope_parts((scopes or {}).get(sig))
+    if suffix and not str(record.get("target") or "").endswith(suffix):
+        return False
+    if repeats_only and (marks is None or id(record) not in marks):
+        return False
+    return True
 
 
 def has_new_recurrence(state: dict, members, records, scopes=None) -> bool:
-    """True when some CLAIMED member record postdates closure and last comment."""
+    """True when some CLAIMED member record postdates closure and last comment.
+
+    Repeats are paired within the records handed in: recur-comment and rollup
+    read a --days window from now, while family show reads the closure-scaled
+    horizon, so a retry whose first failure predates the caller's window reads
+    as a first failure here and as a repeat there. Loops are minutes long in
+    practice; the asymmetry is documented, not hidden.
+    """
     boundary = recurrence_boundary(state)
     if boundary is None:
         return False
+    marks = repeat_marks(records) if needs_repeat_marks(members, scopes) else None
     return any(
-        member_record(members, scopes, record) and newer_than(record.get("ts"), boundary)
+        member_record(members, scopes, record, marks) and newer_than(record.get("ts"), boundary)
         for record in records
     )
 
@@ -2763,8 +2842,9 @@ def verification_details(state: dict, members, records,
     # its instant, project and signature makes the read checkable in place.
     first = None
     first_when = None
+    marks = repeat_marks(records) if needs_repeat_marks(live_members, scopes) else None
     for record in records:
-        if not (member_record(live_members, scopes, record)
+        if not (member_record(live_members, scopes, record, marks)
                 and newer_than(record.get("ts"), boundary)):
             continue
         when = parse_ts(record.get("ts"))  # newer_than already refused the unparseable
@@ -3785,6 +3865,9 @@ def main() -> None:
     fsc.add_argument("family")
     fsc.add_argument("sig")
     fsc.add_argument("--target-suffix", help="count only records whose target ends with this")
+    fsc.add_argument("--repeats-only", action="store_true",
+                     help="count only the second and later occurrences for the same "
+                          "session, agent and target (a loop-breaking remedy's claim)")
     fsc.add_argument("--clear", action="store_true", help="remove the scope")
     fsc.set_defaults(func=cmd_family_scope)
 

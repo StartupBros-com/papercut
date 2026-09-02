@@ -346,6 +346,11 @@ disposing: `papercut family scope <family> <sig> --target-suffix .jsonl`
 makes recurrence and verification read only matching targets while ranking
 keeps full volume. The suffix must come from the dossier's No-Claim
 Boundary — scoping tighter than the written claim hides real recurrence.
+A remedy that breaks retry loops (a guard that denies the second attempt, a
+hook that rewrites it) never stops the first failure, so its signature keeps
+firing while the fix works; add `--repeats-only` and only the second and
+later occurrences for the same session, agent and target count. Both flags
+combine, and a scope event replaces the whole boundary.
 
 **Pick member signatures whose silence is the success signal.** Recurrence
 and verification read member records, so a member signature that fires when

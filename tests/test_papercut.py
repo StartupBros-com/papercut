@@ -2757,6 +2757,103 @@ class TestClaimScopedVerification(PapercutBase):
                                target_suffix=".jsonl")
         self.assertEqual(PC.fold_families()["scopes"], {})
 
+    def test_repeats_only_ignores_first_failures(self):
+        # A loop-breaking remedy does not stop first failures; three sessions
+        # each failing once is the remedy working, not regressing.
+        self.close("loops")
+        PC.record_family_event("loops", "scope", sig=self.SIG, repeats_only=True)
+        self.write("-p", [self.rec(sig=self.SIG, session=s, days_ago=1, target="/x/a.py")
+                          for s in ("s1", "s2", "s3")])
+        self.assertEqual(self.stage("loops"), "verifying")
+
+    def test_repeats_only_counts_a_retry_loop(self):
+        # Planted negative: the same caller failing twice on the same target
+        # after closure is exactly the loop the remedy claims to break.
+        self.close("looped")
+        PC.record_family_event("looped", "scope", sig=self.SIG, repeats_only=True)
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py"),
+                          self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py")])
+        self.assertEqual(self.stage("looped"), "regressed")
+
+    def test_repeats_only_is_per_agent_and_per_target(self):
+        # Two subagents failing once each, or one caller on two files, are
+        # first failures, not a loop.
+        self.close("split")
+        PC.record_family_event("split", "scope", sig=self.SIG, repeats_only=True)
+        a = self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py")
+        a["agent"] = "agentaaa"
+        b = self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py")
+        b["agent"] = "agentbbb"
+        c = self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/b.py")
+        self.write("-p", [a, b, c])
+        self.assertEqual(self.stage("split"), "verifying")
+
+    def test_repeats_only_combines_with_a_target_suffix(self):
+        self.close("both")
+        PC.record_family_event("both", "scope", sig=self.SIG,
+                               target_suffix=".jsonl", repeats_only=True)
+        self.write("-p", [self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py"),
+                          self.rec(sig=self.SIG, session="s1", days_ago=1, target="/x/a.py")])
+        self.assertEqual(self.stage("both"), "verifying", "a loop outside the suffix is out of claim")
+        self.write("-p", [self.rec(sig=self.SIG, session="s2", days_ago=1, target="/x/t.jsonl"),
+                          self.rec(sig=self.SIG, session="s2", days_ago=1, target="/x/t.jsonl")])
+        self.assertEqual(self.stage("both"), "regressed")
+
+    def test_repeats_only_folds_as_a_visible_boundary_and_clears(self):
+        PC.record_family_event("first", "assign", sig=self.SIG)
+        PC.record_family_event("first", "scope", sig=self.SIG,
+                               target_suffix=".jsonl", repeats_only=True)
+        self.assertEqual(PC.fold_families()["scopes"],
+                         {self.SIG: {"suffix": ".jsonl", "repeats_only": True}})
+        PC.record_family_event("first", "scope", sig=self.SIG, target_suffix=".jsonl")
+        self.assertEqual(PC.fold_families()["scopes"], {self.SIG: ".jsonl"},
+                         "a later plain scope replaces the whole boundary")
+        PC.record_family_event("first", "scope", sig=self.SIG, target_suffix="")
+        self.assertEqual(PC.fold_families()["scopes"], {})
+
+    def test_repeat_marks_orders_hook_and_cli_timestamps_by_time(self):
+        # The hook writes ms+Z, the CLI writes us+offset; raw string order
+        # inverts them (refute-vet finding). The later record is the repeat.
+        first = {"ts": "2026-09-01T09:23:00.789Z", "sig": self.SIG, "session": "s1",
+                 "agent": "", "target": "/x/a.py"}
+        second = {"ts": "2026-09-01T09:23:00.789012+00:00", "sig": self.SIG, "session": "s1",
+                  "agent": "", "target": "/x/a.py"}
+        marks = PC.repeat_marks([second, first])
+        self.assertEqual(marks, {id(second)})
+
+    def test_repeat_marks_never_pairs_records_without_a_subject(self):
+        # No target and no command cannot prove a repeat of anything.
+        a = {"ts": "2026-09-01T09:23:00Z", "sig": self.SIG, "session": "s1", "agent": "", "target": "", "cmd": ""}
+        b = {"ts": "2026-09-01T09:24:00Z", "sig": self.SIG, "session": "s1", "agent": "", "target": "", "cmd": ""}
+        self.assertEqual(PC.repeat_marks([a, b]), set())
+        unparseable = {"ts": "yesterday", "sig": self.SIG, "session": "s1", "agent": "", "target": "/x/a.py"}
+        real = {"ts": "2026-09-01T09:24:00Z", "sig": self.SIG, "session": "s1", "agent": "", "target": "/x/a.py"}
+        self.assertEqual(PC.repeat_marks([unparseable, real]), set())
+
+    def test_cli_scope_says_when_it_replaces_a_boundary(self):
+        PC.record_family_event("owner", "assign", sig="loop:sig")
+        env = dict(os.environ, PAPERCUT_STORE=str(self.store))
+        subprocess.run([sys.executable, str(PAPERCUT), "family", "scope", "owner", "loop:sig",
+                        "--repeats-only"], capture_output=True, text=True, timeout=30, check=False, env=env)
+        p = subprocess.run([sys.executable, str(PAPERCUT), "family", "scope", "owner", "loop:sig",
+                            "--target-suffix", ".py"], capture_output=True, text=True, timeout=30,
+                           check=False, env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("replaced the previous boundary: repeats only", p.stdout)
+        self.assertEqual(PC.fold_families()["scopes"], {"loop:sig": ".py"})
+
+    def test_cli_scope_accepts_repeats_only_without_a_suffix(self):
+        PC.record_family_event("owner", "assign", sig="loop:sig")
+        env = dict(os.environ, PAPERCUT_STORE=str(self.store))
+        p = subprocess.run(
+            [sys.executable, str(PAPERCUT), "family", "scope", "owner",
+             "loop:sig", "--repeats-only"],
+            capture_output=True, text=True, timeout=30, check=False, env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("repeats only", p.stdout)
+        self.assertEqual(PC.fold_families()["scopes"],
+                         {"loop:sig": {"suffix": "", "repeats_only": True}})
+
     def test_cli_scope_refuses_an_unassigned_signature(self):
         env = dict(os.environ, PAPERCUT_STORE=str(self.store))
         p = subprocess.run(
