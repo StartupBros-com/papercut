@@ -427,6 +427,12 @@ function record(input) {
     target: String(target).slice(0, 200),
     cwd: String(input.cwd || '').slice(0, 200),
     session: String(input.session_id || '').slice(-8),
+    // The subagent that made the call, when the hook fired inside one. A
+    // session running a fleet fails once per agent, which a session-keyed
+    // count reads as one agent retrying N times (2026-09-02: three agents,
+    // one wrapped failure each, looked like retry depth 3). Same 8-char
+    // convention as `session`; empty for the main conversation.
+    agent: String(input.agent_id || '').slice(-8),
     ms: typeof input.duration_ms === 'number' ? input.duration_ms : null,
     source: 'auto',
   };
