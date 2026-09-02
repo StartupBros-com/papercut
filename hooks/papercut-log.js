@@ -313,6 +313,19 @@ function extractError(input) {
  * The one thing this tool call was about, for tools that do not take a command.
  * Allowlisted keys only, first match wins, strings only.
  */
+/** {offset, limit} of a Read's tool_input as finite non-negative integers, or null. */
+function readPage(toolName, toolInput) {
+  if (String(toolName) !== 'Read' || !toolInput || typeof toolInput !== 'object') return null;
+  const page = {};
+  for (const key of ['offset', 'limit']) {
+    const n = Number(toolInput[key]);
+    if (toolInput[key] !== undefined && toolInput[key] !== null && Number.isFinite(n) && n >= 0) {
+      page[key] = Math.floor(n);
+    }
+  }
+  return Object.keys(page).length ? page : null;
+}
+
 function toolTarget(toolInput) {
   if (!toolInput || typeof toolInput !== 'object') return '';
   const KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query'];
@@ -468,6 +481,11 @@ function record(input) {
     ms: typeof input.duration_ms === 'number' ? input.duration_ms : null,
     source: 'auto',
   };
+  // The window a failed Read asked for, so a retry can be sized from
+  // evidence (read-ceiling-chunk.js halves the smallest window that failed).
+  // Numbers only, never content; absent when the call carried neither.
+  const page = readPage(input.tool_name, input.tool_input);
+  if (page) rec.page = page;
 
   let line = JSON.stringify(rec) + '\n';
   if (Buffer.byteLength(line) > MAX_RECORD_BYTES) {
@@ -675,6 +693,37 @@ function readLimitHint(input) {
     + 'jq, grep and tail filter it without loading the whole file.');
 }
 
+// an earlier change: agents in pnpm workspaces guess a root-level binary
+// (node_modules/.bin/tsx) that the workspace never installs there, fail, then
+// probe sibling checkouts' node_modules with ls. Measured 2026-08-31..09-02:
+// 117 of 120 no_such_file:tsx records were that hunt, every checkout involved
+// had node_modules, and tsx was declared only in apps/*/package.json. The hint
+// names where workspace binaries live at the moment the guess fails.
+// Informational phrasing only (imperative additionalContext backfires here).
+// A missing `.bin/<bin>` is a binary; a missing `node_modules/<pkg>` is a
+// package (possibly scoped, `@scope/pkg`). A bare scope directory or a
+// deeper path never matches: the hint would name something that is not a
+// thing to run (refute-vet finding, 2026-09-02).
+const WORKSPACE_BIN_ERR = /node_modules\/\.bin\/([A-Za-z0-9_.-]+)['"]?: No such file or directory/;
+const WORKSPACE_PKG_ERR = /node_modules\/((?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+)['"]?: No such file or directory/;
+
+function workspaceBinHint(input) {
+  const err = extractError(input);
+  let m = err.match(WORKSPACE_BIN_ERR);
+  if (m) {
+    return ('No `' + m[1] + '` binary under that node_modules. In a pnpm workspace a binary is '
+      + 'installed with the package that declares it, not at the root: `pnpm --filter <package> exec '
+      + m[1] + ' ...` runs it from anywhere in the checkout, and the root package.json scripts show '
+      + 'the convention. Other checkouts\' node_modules will not have it either.');
+  }
+  m = err.match(WORKSPACE_PKG_ERR);
+  if (!m) return null;
+  return ('No `' + m[1] + '` package under that node_modules. In a pnpm workspace a dependency is '
+    + 'installed under the workspace member that declares it, not at the root; `pnpm why ' + m[1]
+    + '` names that member, and its binary runs through it with `pnpm --filter <package> exec <bin> ...`. '
+    + 'Other checkouts\' node_modules will not have it either.');
+}
+
 function run(rawInput) {
   let input = {};
   try { input = JSON.parse(rawInput); } catch { return rawInput; }
@@ -685,15 +734,17 @@ function run(rawInput) {
     // A logger must never break a session. Swallow everything.
   }
 
-  // an earlier change: on the one failure shape where the error's own advice cannot
-  // help (a whole-.jsonl read past the ceiling), answer with the tool that
-  // can. additionalContext is the documented PostToolUseFailure channel; the
-  // hint path replaces the legacy raw-input echo for THIS shape only, and a
-  // hint failure falls back to the echo — never a broken session.
+  // an earlier change opened this path for the one failure shape where the error's
+  // own advice cannot help (a whole-.jsonl read past the ceiling); the
+  // repeat, StructuredOutput and workspace-binary shapes joined it since.
+  // additionalContext is the documented PostToolUseFailure channel; every
+  // other failure keeps the legacy raw-input echo, and a hint failure falls
+  // back to the echo — never a broken session.
   try {
     const hint = readLimitRepeatHint(input, path.join(storeDir(), `${projectSlug(input.cwd)}.jsonl`))
       || readLimitHint(input)
-      || structuredOutputHint(input);
+      || structuredOutputHint(input)
+      || workspaceBinHint(input);
     if (hint) {
       return JSON.stringify({
         hookSpecificOutput: {
@@ -710,7 +761,7 @@ function run(rawInput) {
 
 module.exports = {
   run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
-  appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape,
+  appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape, workspaceBinHint,
   storeDir,
 };
 

@@ -59,8 +59,9 @@ python3 -m papercut adopt my-family        # validate the dossier, file the work
   (distinct capture sessions since the fix) against a floor before quiet
   counts as anything.
 - **Capture costs nothing.** The hook exits 0 with no stdout, so records never
-  enter the transcript. One deliberate exception: an oversized-`.jsonl` read
-  failure returns a one-line hint naming a better tool.
+  enter the transcript. A few deliberate exceptions return a one-line hint at
+  the moment of failure: an oversized read, a repeated oversized read, a
+  StructuredOutput shape mismatch, and a missing workspace binary.
 - **Duplicates are wanted.** Ranking is by distinct sessions, so logging the
   same friction again is exactly how it gets prioritized. Never deduplicate
   before logging.
