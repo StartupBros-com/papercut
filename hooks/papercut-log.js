@@ -708,7 +708,7 @@ function readLimitHint(input) {
 // thing to run (refute-vet finding, 2026-09-02).
 // The optional absolute prefix names the checkout the failing path belongs
 // to; a session in one worktree probing another's node_modules (the live
-// example-project/pushbot records) must be answered about THAT checkout, not its cwd.
+// example-project/example-project records) must be answered about THAT checkout, not its cwd.
 const WORKSPACE_BIN_ERR = /((?:\/[^'"\s]*)?)node_modules\/\.bin\/([A-Za-z0-9_.-]+)['"]?: No such file or directory/;
 const WORKSPACE_PKG_ERR = /((?:\/[^'"\s]*)?)node_modules\/((?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+)['"]?: No such file or directory/;
 // Node's own loader says it differently when a script path inside a package
@@ -722,9 +722,22 @@ function checkoutOf(prefix, cwd) {
   return p.startsWith('/') ? p : cwd;
 }
 
+// ESLint 9 looks for eslint.config.* from the working directory upward and
+// fails before linting anything when the checkout root has none; in a pnpm
+// workspace the config lives with each package that lints. 25 records from
+// 6 sessions in a day, all `node <checkout>/node_modules/eslint/bin/eslint.js`
+// from a worktree root.
+const WORKSPACE_ESLINT_ERR = /ESLint couldn't find an eslint\.config\.\(js\|mjs\|cjs\) file/;
+
 function workspaceBinHint(input) {
   const err = extractError(input);
   const cwd = String(input.cwd || '');
+  if (WORKSPACE_ESLINT_ERR.test(err)) {
+    return ('ESLint found no eslint.config.* from that directory upward. In a pnpm workspace the '
+      + 'config usually lives with each package that lints rather than the checkout root, and '
+      + '`pnpm --filter <package> lint` (or `pnpm -r lint`) runs it with that config; outside a '
+      + 'workspace the directory is simply missing an eslint.config.*.');
+  }
   let m = err.match(WORKSPACE_BIN_ERR);
   if (m) {
     return ('No `' + m[2] + '` binary under that node_modules. In a pnpm workspace a binary is '
