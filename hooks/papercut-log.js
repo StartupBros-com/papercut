@@ -706,22 +706,52 @@ function readLimitHint(input) {
 // package (possibly scoped, `@scope/pkg`). A bare scope directory or a
 // deeper path never matches: the hint would name something that is not a
 // thing to run (refute-vet finding, 2026-09-02).
-const WORKSPACE_BIN_ERR = /node_modules\/\.bin\/([A-Za-z0-9_.-]+)['"]?: No such file or directory/;
-const WORKSPACE_PKG_ERR = /node_modules\/((?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+)['"]?: No such file or directory/;
+// The optional absolute prefix names the checkout the failing path belongs
+// to; a session in one worktree probing another's node_modules (the live
+// example-project/pushbot records) must be answered about THAT checkout, not its cwd.
+const WORKSPACE_BIN_ERR = /((?:\/[^'"\s]*)?)node_modules\/\.bin\/([A-Za-z0-9_.-]+)['"]?: No such file or directory/;
+const WORKSPACE_PKG_ERR = /((?:\/[^'"\s]*)?)node_modules\/((?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+)['"]?: No such file or directory/;
+// Node's own loader says it differently when a script path inside a package
+// is run directly (`node <checkout>/node_modules/tsx/dist/cli.mjs`): 41
+// records in a day, same hunt, same answer.
+const WORKSPACE_MODULE_ERR = /Cannot find module '((?:[^']*\/)?)node_modules\/((?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+)(?:\/[^']*)?'/;
+
+/** The checkout a matched node_modules path belongs to: its absolute prefix, else the session cwd. */
+function checkoutOf(prefix, cwd) {
+  const p = String(prefix || '').replace(/\/+$/, '');
+  return p.startsWith('/') ? p : cwd;
+}
 
 function workspaceBinHint(input) {
   const err = extractError(input);
+  const cwd = String(input.cwd || '');
   let m = err.match(WORKSPACE_BIN_ERR);
   if (m) {
-    return ('No `' + m[1] + '` binary under that node_modules. In a pnpm workspace a binary is '
+    return ('No `' + m[2] + '` binary under that node_modules. In a pnpm workspace a binary is '
       + 'installed with the package that declares it, not at the root: `pnpm --filter <package> exec '
-      + m[1] + ' ...` runs it from anywhere in the checkout, and the root package.json scripts show '
+      + m[2] + ' ...` runs it from anywhere in the checkout, and the root package.json scripts show '
       + 'the convention. Other checkouts\' node_modules will not have it either.');
   }
-  m = err.match(WORKSPACE_PKG_ERR);
+  m = err.match(WORKSPACE_PKG_ERR) || err.match(WORKSPACE_MODULE_ERR);
   if (!m) return null;
-  return ('No `' + m[1] + '` package under that node_modules. In a pnpm workspace a dependency is '
-    + 'installed under the workspace member that declares it, not at the root; `pnpm why ' + m[1]
+  const name = m[2];
+  // A dot-directory (.pnpm virtual store, .cache, .vite) is not a package;
+  // naming it would send the agent after `pnpm why .pnpm` (refute-vet finding).
+  if (name.startsWith('.')) return null;
+  // No node_modules in that checkout at all: the install has not run there
+  // (a fresh worktree), and no per-package path will exist until it does.
+  // Checked only once a match makes it matter.
+  const root = checkoutOf(m[1], cwd);
+  let installed = true;
+  try { installed = !root || fs.existsSync(path.join(root, 'node_modules')); } catch { installed = true; }
+  if (!installed) {
+    return ('No `' + name + '` package, and no node_modules at all in ' + root + ': the workspace install '
+      + 'has not run in that checkout yet (`pnpm install` from its root creates it; a worktree does not '
+      + 'share the main checkout\'s). After that, a binary runs through the package that declares it: '
+      + '`pnpm --filter <package> exec <bin> ...`.');
+  }
+  return ('No `' + name + '` package under that node_modules. In a pnpm workspace a dependency is '
+    + 'installed under the workspace member that declares it, not at the root; `pnpm why ' + name
     + '` names that member, and its binary runs through it with `pnpm --filter <package> exec <bin> ...`. '
     + 'Other checkouts\' node_modules will not have it either.');
 }

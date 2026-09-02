@@ -110,7 +110,10 @@ function ceilingFailures(storeFile, session, agent, target, getLines = () => nul
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, st.size - len);
     let count = 0;
-    let minLimit = DEFAULT_PAGE;
+    // The smallest window that actually failed; a failure larger than the
+    // default page is reported as what it was (seen live: a 2505-line
+    // failure reported as 2000 because the tracker started at 2000).
+    let minLimit = Infinity;
     let fit = Infinity;
     let denials = 0;
     for (const line of buf.toString('utf8').split('\n')) {
@@ -153,6 +156,7 @@ function ceilingFailures(storeFile, session, agent, target, getLines = () => nul
         }
       } catch { /* skip unparsable or partial line */ }
     }
+    if (!Number.isFinite(minLimit)) minLimit = DEFAULT_PAGE;
     return { count, minLimit, fit, denials };
   } catch {
     return { count: 0, minLimit: DEFAULT_PAGE, fit: Infinity, denials: 0 };
