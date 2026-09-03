@@ -1,6 +1,6 @@
 # papercut: extraction design for a marketplace plugin
 
-Status: **design only.** Nothing is published. Publication stays gated on the
+Status: **shipped.** This is the design record that produced this plugin; it is kept as written. Current state: released continuously since 2026-08-31 (see the releases page), listed in hov-marketplace as `papercut@hov`, verification status stated in the README. Release mechanics live in `scripts/release/`. Publication stays gated on the
 proofs listed under "Gates" below.
 
 Source of record: a five-dimension audit (coupling, GitHub-dependency,
