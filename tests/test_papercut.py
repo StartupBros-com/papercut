@@ -1236,8 +1236,13 @@ class TestStaleness(PapercutBase):
                 raise PermissionError(13, "Permission denied")
             return real_stat(self, *a, **k)
 
+        # Pin the profile at the fixture. Without this the call reads the
+        # REAL machine's profile: it passed locally (a developer box has
+        # transcripts) and failed on a clean runner (none), which is a test
+        # that was green for the wrong reason rather than a passing test.
         buf = io.StringIO()
         with _mock.patch.object(Path, "stat", unreadable_store), \
+             _mock.patch.object(PC, "claude_config_dir", lambda: home / ".claude"), \
              contextlib.redirect_stdout(buf):
             PC.cmd_staleness(argparse.Namespace(
                 max_gap_hours=72.0, max_transcript_scan=None))
