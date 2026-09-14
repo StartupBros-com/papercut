@@ -4837,6 +4837,32 @@ class TestDispatchHandoff(PapercutBase):
     and printed, never stored. The plain read path keeps making no gh call.
     """
 
+    def setUp(self):
+        super().setUp()
+        self._saved_dispatch_label = PC.DISPATCH_READY_LABEL
+        # This whole surface only exists where a queue is configured, and the
+        # handoff block is gated on that. State the precondition rather than
+        # inheriting it from a default: the packaged copy ships no queue, so a
+        # test that relies on the default passes here and fails there, which is
+        # a test asserting the configuration rather than the behavior.
+        PC.DISPATCH_READY_LABEL = "the dispatch-ready label"
+
+    def tearDown(self):
+        PC.DISPATCH_READY_LABEL = self._saved_dispatch_label
+        super().tearDown()
+
+    def test_no_configured_queue_prints_no_handoff_block(self):
+        """The symmetric case, which is the packaged default.
+
+        Without a queue there is no boundary for an item to sit at, so naming
+        one would describe another team's machinery at someone who has none.
+        """
+        PC.DISPATCH_READY_LABEL = ""
+        self.seed_four_states()
+        out, status = self.rollup(refresh=True)
+        self.assertEqual(status, 0)
+        self.assertNotIn("dispatch handoff:", out)
+
     def assign(self, family, *sigs):
         for sig in sigs:
             PC.record_family_event(family, "assign", sig=sig)

@@ -1112,7 +1112,8 @@ def cmd_staleness(args: argparse.Namespace) -> None:
         return
     if newest_cut == 0:
         print("WARN papercut capture: sessions are running but the store is EMPTY "
-              "— is the PostToolUseFailure hook registered? (your config sync reconcile-papercut-hook)")
+              "— is the PostToolUseFailure hook registered? Check that the papercut "
+              "plugin is enabled.")
         return
     gap_h = (newest_session - newest_cut) / 3600.0
     # Oversized stores stop accepting writes silently; surface that as the same alarm.
@@ -3642,7 +3643,10 @@ def cmd_rollup(args: argparse.Namespace) -> None:
     # human boundary -- an adopted item is dispatchable the moment the
     # operator tags it `the dispatch-ready label`, and until this line existed nothing showed
     # which items were sitting at that boundary.
-    if dispatch_snapshot:
+    # Gated on a configured queue for the same reason the adopt guidance is:
+    # with no queue there is no boundary to sit at, and an installation
+    # without one was being shown another team's intake vocabulary.
+    if dispatch_snapshot and DISPATCH_READY_LABEL:
         print("dispatch handoff:")
         for family in sorted(dispatch_snapshot):
             print(dispatch_handoff_line(family, dispatch_snapshot[family]))
@@ -3977,7 +3981,7 @@ def main() -> None:
                     help="window used to report what is being suppressed (default 30d)")
     rv.set_defaults(func=cmd_resolve)
 
-    st = sub.add_parser("staleness", help="is capture still alive? (for a weekly scheduled run)")
+    st = sub.add_parser("staleness", help="is capture still alive?")
     st.add_argument("--max-gap-hours", type=float, default=72.0)
     st.set_defaults(func=cmd_staleness)
 
