@@ -14,6 +14,16 @@ on:
 permissions:
   contents: read
 
+# GitHub's implicit Linux shell is `bash -e`, which does NOT set pipefail, so a
+# step whose command pipes a failing process into a filter reports the FILTER's
+# status. Measured 2026-09-14 against a deliberately failing one-test suite:
+# `python3 -m unittest ... | tail -5` printed "FAILED (failures=1)" and exited 0.
+# Selecting bash explicitly adds `-o pipefail`. Setting it once here rather than
+# per step is the point -- the next author to add a pipe inherits the fix.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   tests:
     name: tests and shipped contracts
@@ -22,12 +32,31 @@ jobs:
       - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
         with:
           persist-credentials: false
+      # No `| tail`: truncating the output was hiding the failure report, and the
+      # pipeline was also what let a red suite exit green. A failing run should
+      # print the tracebacks that say WHY, not the last five lines that say only
+      # that something did.
       - name: unit tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tail -5
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      # Tests the hooks a CUSTOMER receives, at their shipped paths. Source-side
+      # hook tests cannot prove this: the vendor rewrites the sibling require
+      # from ../PostToolUseFailure/ to ./, and that rewrite has no source-side
+      # exercise. Globbed rather than passed `tests/hooks/` as a directory --
+      # Node 24 treats a directory positional as an entry module to load and
+      # fails with MODULE_NOT_FOUND (reproduced outside this repo).
+      - name: JS hook tests (packaged, customer-facing)
+        run: node --test tests/hooks/*.test.js
+      # Proves the installed artifact works on a clean profile: no papercut on
+      # PATH, temp HOME and CLAUDE_CONFIG_DIR, unrelated cwd. Every assertion
+      # here was mutation-tested to fail for the right reason.
+      - name: clean-install smoke (customer artifact)
+        run: bash tests/install-smoke.test.sh
       - name: stdlib-only contract
         run: python3 scripts/check_stdlib_only.py
       - name: zero private references
         run: python3 scripts/check_no_private_refs.py
+      - name: version consistency
+        run: python3 scripts/check_version_consistency.py
       - name: Provision pinned CI tools
         run: ./scripts/provision-ci-tools.sh
       - name: release-policy smoke
@@ -64,6 +93,31 @@ jobs:
             echo "::error::missing skills/$name/SKILL.md — the marketplace validator requires it"
             exit 1
           }
+      # The gate that proves the gate: a red suite must produce a red check.
+      # See scripts/check_ci_test_gate.py for the measured defect it pins.
+      - name: Test gate integrity
+        run: python3 scripts/check_ci_test_gate.py
+
+      # The docs are SILENT on whether the executable bit survives marketplace
+      # copy-mode, git-subdir clone or zip extraction, and the skill invokes the
+      # launcher directly. Rather than paper over that with an interpreter
+      # prefix, assert the assumption: git must record the bit, so if packaging
+      # ever strips it we find out here instead of in a customer's session.
+      # A top-level bin/ is separately forbidden -- claude.ai organization
+      # distribution rejects any plugin containing one.
+      - name: Launcher ships executable, and not from bin/
+        run: |
+          mode="$(git ls-files -s scripts/papercut | cut -d' ' -f1)"
+          [ "$mode" = "100755" ] || {
+            echo "::error::scripts/papercut is mode '$mode', expected 100755"
+            exit 1
+          }
+          if [ -d bin ]; then
+            echo "::error::a top-level bin/ is rejected by claude.ai org distribution"
+            exit 1
+          fi
+          echo "launcher packaging: ok"
+
       - name: Announce train stays on the shared OIDC workflow
         run: |
           wf=.github/workflows/release-train.yml

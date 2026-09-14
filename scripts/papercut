@@ -1,0 +1,71 @@
+#!/bin/sh
+# papercut plugin-relative launcher.
+#
+# Runs the papercut CLI straight out of this plugin's own checkout, so it
+# works even when the papercut Python package was never `pip install`-ed
+# and is not on PATH -- which is always true on a plugin-only install.
+#
+# It lives in scripts/, NOT bin/, deliberately. A top-level bin/ is added to
+# the Bash tool PATH (so `papercut` would work bare), but claude.ai
+# organization-settings distribution REJECTS any plugin containing one
+# ("Plugin contains a top-level bin/ directory"), for marketplace sync and
+# direct upload alike. The documented workaround is exactly this: keep the
+# executable in scripts/ and reference it through ${CLAUDE_PLUGIN_ROOT}.
+# Verbosity in the skill is the cheaper side of that trade.
+#
+# Preferred invocation (from the shipped skill):
+#   "${CLAUDE_PLUGIN_ROOT}/scripts/papercut" <args>
+#
+# Fallback, documented for any host that does not substitute
+# ${CLAUDE_PLUGIN_ROOT} in skill content: invoke this script by a path
+# relative to wherever it actually lives, e.g. from a skill file that is a
+# known number of directories away from the plugin root:
+#   "$(dirname "$0")/../../../scripts/papercut" <args>
+# or place a symlink to this file anywhere (including on PATH) and invoke
+# that symlink directly -- this script resolves its own real location
+# either way, so both forms reach the same plugin checkout.
+#
+# POSIX sh only: no bashisms. Must run correctly under dash.
+set -eu
+
+# Resolve the real path of this script, following symlinks one hop at a
+# time. Deliberately not `readlink -f` / `realpath`: neither is portable
+# across platforms (GNU vs BSD readlink disagree on -f), so this uses only
+# the symlink-target read that both implementations share.
+resolve_self() {
+  script="$1"
+  while [ -L "$script" ]; do
+    script_dir=$(cd -P "$(dirname "$script")" && pwd)
+    link=$(readlink "$script")
+    case "$link" in
+      /*) script="$link" ;;
+      *) script="$script_dir/$link" ;;
+    esac
+  done
+  script_dir=$(cd -P "$(dirname "$script")" && pwd)
+  printf '%s/%s' "$script_dir" "$(basename "$script")"
+}
+
+self=$(resolve_self "$0")
+script_home=$(dirname "$self")
+plugin_root=$(cd -P "$script_home/.." && pwd)
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "papercut: python3 is required but was not found on PATH." >&2
+  echo "Install Python 3.10+ (e.g. from https://www.python.org/downloads/) and retry." >&2
+  exit 127
+fi
+
+# Put the plugin root (which contains the papercut/ package directory) on
+# PYTHONPATH so `python3 -m papercut` finds it regardless of cwd or of
+# whether the package was ever installed.
+if [ -n "${PYTHONPATH:-}" ]; then
+  PYTHONPATH="$plugin_root:$PYTHONPATH"
+else
+  PYTHONPATH="$plugin_root"
+fi
+export PYTHONPATH
+
+# exec replaces this shell process with python3, so the CLI's own exit
+# status (not the shell's) is what the caller sees.
+exec python3 -m papercut "$@"
