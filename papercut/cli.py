@@ -1043,16 +1043,27 @@ def cmd_resolve(args: argparse.Namespace) -> None:
 # and a transcript file per session ever run inside it, none of it rotated. The
 # staleness check only needs the SINGLE newest mtime among them, but finding
 # that means stat-ing every transcript unless the walk is bounded. Cap it: stop
-# after this many files, in directory-listing order. A file missed past the cap
-# can only make `newest_session` look OLDER than the true newest transcript,
-# which can only make the gap look LARGER — the same direction as a real stale
-# hook, never the direction that would hide one. 5000 is generous headroom over
-# a typical profile (low hundreds of projects, low thousands of transcripts
-# total) while still bounding the pathological case.
+# after this many files, in directory-listing order.
+#
+# A file missed past the cap makes `newest_session` look OLDER than the true
+# newest transcript, and because the verdict is
+#     gap = newest_session - newest_cut
+# an understated `newest_session` makes the gap SMALLER, not larger. That is
+# the direction that HIDES a dead hook, which is the opposite of what this
+# comment claimed until 2026-09-14. Demonstrated: old transcripts at -30h, a
+# live one at -0h, capture at -36h, threshold 12h -> a complete scan warns
+# "stale, 36h" and a capped scan printed "healthy (6.0h behind)".
+#
+# So an incomplete scan cannot support a healthy verdict. It can still support
+# a STALE one: the true `newest_session` is only ever >= the observed one, so a
+# gap already over threshold stays over it. cmd_staleness encodes exactly that
+# asymmetry. 5000 is generous headroom over a typical profile (low hundreds of
+# projects, low thousands of transcripts total) while still bounding the
+# pathological case.
 STALENESS_TRANSCRIPT_SCAN_CAP = 5000
 
 
-def newest_transcript_activity(root: Path) -> tuple[float, bool]:
+def newest_transcript_activity(root: Path, cap: int | None = None) -> tuple[float, bool]:
     """The newest mtime among `root`'s `<project>/<session>.jsonl` transcripts,
     and whether the scan hit its cap before finishing.
 
@@ -1061,6 +1072,7 @@ def newest_transcript_activity(root: Path) -> tuple[float, bool]:
     active right now can sit under a project directory untouched for days.
     Only the transcript files themselves carry the real signal.
     """
+    limit = STALENESS_TRANSCRIPT_SCAN_CAP if cap is None else cap
     newest = 0.0
     capped = False
     scanned = 0
@@ -1076,7 +1088,7 @@ def newest_transcript_activity(root: Path) -> tuple[float, bool]:
         except OSError:
             continue
         for fp in transcripts:
-            if scanned >= STALENESS_TRANSCRIPT_SCAN_CAP:
+            if scanned >= limit:
                 capped = True
                 return newest, capped
             scanned += 1
@@ -1105,7 +1117,8 @@ def cmd_staleness(args: argparse.Namespace) -> None:
     # keeps this check asking about the profile that's actually active instead
     # of always defaulting to the home one.
     projects = claude_config_dir() / "projects"
-    newest_session, session_scan_capped = newest_transcript_activity(projects)
+    scan_cap = getattr(args, "max_transcript_scan", None)
+    newest_session, session_scan_capped = newest_transcript_activity(projects, scan_cap)
 
     if newest_session == 0:
         print("papercut capture: no session activity to compare against")
@@ -1124,7 +1137,24 @@ def cmd_staleness(args: argparse.Namespace) -> None:
                       f"of {MAX_LOG_BYTES // 1048576}MB — writes stop SILENTLY at the cap; prune or rotate")
         except OSError:
             pass
-    if gap_h < 0:
+    # A capped scan understates newest_session, which shrinks the gap. Only the
+    # STALE verdict survives that: the true gap is >= the observed one, so a gap
+    # already over threshold stays over it. "Healthy" and the negative-gap
+    # reading both depend on the observed gap being the real one, so neither can
+    # be asserted from an incomplete scan -- say so instead of guessing.
+    if gap_h > args.max_gap_hours:
+        print(f"WARN papercut capture stale: newest record is {gap_h:.0f}h older than the "
+              f"newest session (threshold {args.max_gap_hours}h) — capture may be dead")
+        if session_scan_capped:
+            print(f"  (transcript scan stopped at {scan_cap or STALENESS_TRANSCRIPT_SCAN_CAP} files; the "
+                  f"real gap can only be larger, so this finding stands)")
+    elif session_scan_capped:
+        print(f"WARN papercut capture: INSUFFICIENT EVIDENCE — the transcript scan stopped at "
+              f"{scan_cap or STALENESS_TRANSCRIPT_SCAN_CAP} files, so the newest session time is a lower "
+              f"bound and the {gap_h:.1f}h gap is a lower bound too. Capture may be dead and "
+              f"this check cannot tell. Re-run with --max-transcript-scan raised above the "
+              f"profile's transcript count.")
+    elif gap_h < 0:
         # A record newer than the newest transcript activity is clock skew or a
         # future mtime, not evidence of anything -- printing it as "healthy"
         # with a negative number reads as a clean bill of health when the two
@@ -1132,15 +1162,8 @@ def cmd_staleness(args: argparse.Namespace) -> None:
         # trusted.
         print(f"WARN papercut capture: newest record is {-gap_h:.1f}h AHEAD of the newest "
               f"session activity — clock skew or a future mtime, not a clean bill of health")
-    elif gap_h > args.max_gap_hours:
-        print(f"WARN papercut capture stale: newest record is {gap_h:.0f}h older than the "
-              f"newest session (threshold {args.max_gap_hours}h) — capture may be dead")
     else:
         print(f"papercut capture: healthy (newest record {gap_h:.1f}h behind newest session)")
-    if session_scan_capped:
-        print(f"WARN papercut staleness: transcript scan stopped at "
-              f"{STALENESS_TRANSCRIPT_SCAN_CAP} files — newest-session time may be "
-              f"understated, which only biases this check toward stale, never toward healthy")
 
 
 def read_records(days: int, project: str | None = None, *,
@@ -3983,6 +4006,12 @@ def main() -> None:
 
     st = sub.add_parser("staleness", help="is capture still alive?")
     st.add_argument("--max-gap-hours", type=float, default=72.0)
+    # Named by the insufficient-evidence message, which would otherwise tell
+    # the reader to run something that does not exist.
+    st.add_argument("--max-transcript-scan", type=int,
+                    default=STALENESS_TRANSCRIPT_SCAN_CAP,
+                    help="stat at most this many transcripts (default "
+                         f"{STALENESS_TRANSCRIPT_SCAN_CAP}); raise it when the scan reports insufficient evidence")
     st.set_defaults(func=cmd_staleness)
 
     t = sub.add_parser("triage", help="prepare local evidence dossiers for flagged families")

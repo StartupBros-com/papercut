@@ -1144,6 +1144,80 @@ class TestStaleness(PapercutBase):
             capture_output=True, text=True, timeout=30, check=False, env=env,
         ).stdout
 
+    def capped_fixture(self, *argv, transcript_ago, record_ago, scan_cap):
+        """Transcripts all the SAME age, so the verdict does not depend on
+        which file an early-stopping scan happens to drop.
+
+        Filesystem iteration order is not guaranteed, so a fixture that relies
+        on the cap missing one specific newer file is flaky by construction --
+        it passed or failed depending on which project directory iterdir
+        returned first. What must be pinned is the RULE: an incomplete scan
+        cannot support a healthy verdict, whichever file it missed.
+        """
+        home = Path(tempfile.mkdtemp(prefix="papercut-home-cap-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        projects = home / ".claude" / "projects"
+        now = time.time()
+        for name in ("-alpha", "-beta"):
+            d = projects / name
+            d.mkdir(parents=True)
+            for i in range(4):
+                fp = d / f"s{i}.jsonl"
+                fp.write_text('{"type": "user"}\n', encoding="utf-8")
+                os.utime(fp, (now - transcript_ago, now - transcript_ago))
+        self.write("-p", [self.rec()])
+        rec = self.store / "-p.jsonl"
+        os.utime(rec, (now - record_ago, now - record_ago))
+        env = dict(os.environ, PAPERCUT_STORE=str(self.store),
+                   HOME=str(home), USERPROFILE=str(home))
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        return subprocess.run(
+            [sys.executable, str(PAPERCUT), "staleness",
+             "--max-transcript-scan", str(scan_cap), *argv],
+            capture_output=True, text=True, timeout=30, check=False, env=env,
+        ).stdout
+
+    def test_a_capped_scan_never_reports_health(self):
+        """The defect: an incomplete scan printed an unqualified "healthy".
+
+        The verdict is newest_session - newest_cut, so a missed transcript
+        understates newest_session and SHRINKS the gap -- the direction that
+        hides a dead hook, not the one the code claimed. Observed 2026-09-14:
+        transcripts at -30h, a live one at -0h, capture at -36h, threshold 12h
+        -> a complete scan warned "stale, 36h" while a capped scan printed
+        "healthy (6.0h behind)".
+        """
+        out = self.capped_fixture(
+            "--max-gap-hours", "12",
+            transcript_ago=30 * 3600, record_ago=36 * 3600, scan_cap=1,
+        )
+        self.assertNotIn("healthy", out)
+        self.assertIn("INSUFFICIENT EVIDENCE", out)
+
+    def test_the_same_fixture_scanned_fully_does_report_health(self):
+        """The cap flag is the only difference: with a complete scan the very
+        same fixture is entitled to its healthy verdict, so the test above is
+        pinning incompleteness rather than a generally stale fixture."""
+        out = self.capped_fixture(
+            "--max-gap-hours", "12",
+            transcript_ago=30 * 3600, record_ago=36 * 3600, scan_cap=10000,
+        )
+        self.assertIn("healthy", out)
+        self.assertNotIn("INSUFFICIENT EVIDENCE", out)
+
+    def test_a_capped_scan_still_reports_a_stale_finding(self):
+        """The asymmetry that keeps this useful: the true newest_session is
+        only ever >= the observed one, so a gap already over threshold stays
+        over it. A cap must not downgrade a real stale finding to
+        "insufficient evidence" -- that would trade a false healthy for a
+        blind spot."""
+        out = self.capped_fixture(
+            "--max-gap-hours", "1",
+            transcript_ago=2 * 3600, record_ago=48 * 3600, scan_cap=1,
+        )
+        self.assertIn("WARN papercut capture stale", out)
+        self.assertIn("this finding stands", out)
+
     def test_empty_store_with_active_sessions_warns_specifically(self):
         # The dead-index shape: capture is dead but silence looks like "nothing happened".
         out = self.staleness()

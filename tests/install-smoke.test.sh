@@ -17,6 +17,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# PAPERCUT_STORE outranks BOTH CLAUDE_CONFIG_DIR and HOME in the CLI's store
+# resolution, so overriding only the latter two does not isolate anything: a
+# caller who exports PAPERCUT_STORE sends this test's synthetic capture into
+# THEIR store, and the containment check below then reports the leak it just
+# caused rather than preventing it. Resolve the caller's store once, for the
+# containment assertion, then remove the variable so no child inherits it.
+CALLER_STORE="${PAPERCUT_STORE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/papercuts}"
+CALLER_STORE_WAS_SET="${PAPERCUT_STORE:+yes}"
+unset PAPERCUT_STORE
+
 pass() { printf 'PASS - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1" >&2; exit 1; }
 
@@ -67,6 +77,7 @@ launcher_script="$SCRATCH/run-launcher.sh"
 cat > "$launcher_script" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+unset PAPERCUT_STORE
 export PATH="$MIN_PATH"
 export HOME="$PROFILE1_HOME"
 export CLAUDE_CONFIG_DIR="$PROFILE1_CFG"
@@ -178,6 +189,7 @@ hook_script="$SCRATCH/run-hook.sh"
 cat > "$hook_script" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+unset PAPERCUT_STORE
 export PATH="$MIN_PATH"
 export HOME="$PROFILE1_HOME"
 export CLAUDE_CONFIG_DIR="$PROFILE1_CFG"
@@ -197,6 +209,7 @@ readback_script="$SCRATCH/run-readback.sh"
 cat > "$readback_script" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+unset PAPERCUT_STORE
 export PATH="$MIN_PATH"
 export HOME="$PROFILE1_HOME"
 export CLAUDE_CONFIG_DIR="$PROFILE1_CFG"
@@ -239,7 +252,9 @@ pass "CLI reads back the SAME store the hook wrote to ($readback_check_out)"
 # produces carries WORKDIR (a freshly minted, globally unique tmp path) as its
 # cwd, so the real store must never mention it, independent of any unrelated
 # concurrent activity.
-real_store="${PAPERCUT_STORE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/papercuts}"
+# Resolved at the top, BEFORE the override was stripped -- re-resolving here
+# would silently point at the hermetic profile and assert nothing.
+real_store="$CALLER_STORE"
 if [ -d "$real_store" ] && grep -Frq "$WORKDIR" "$real_store" 2>/dev/null; then
   fail "the simulated failure leaked into the REAL papercut store ($real_store) -- it mentions this test's tmp cwd"
 fi
@@ -249,6 +264,7 @@ second_readback_script="$SCRATCH/run-second-readback.sh"
 cat > "$second_readback_script" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+unset PAPERCUT_STORE
 export PATH="$MIN_PATH"
 export HOME="$PROFILE2_HOME"
 export CLAUDE_CONFIG_DIR="$PROFILE2_CFG"
@@ -264,5 +280,25 @@ case "$second_out" in
 esac
 [ ! -d "$PROFILE2_CFG/papercuts" ] || fail "a store directory exists under the second profile even though nothing ever wrote to it: $PROFILE2_CFG/papercuts"
 pass "a second, independent profile sees none of the first profile's records"
+
+
+# ---------------------------------------------------------------------------
+# 6. Regression: a caller-exported PAPERCUT_STORE must not receive this test's
+#    records. Guarded by a sentinel so the re-invocation runs exactly once.
+# ---------------------------------------------------------------------------
+if [ -z "${PAPERCUT_SMOKE_INNER:-}" ]; then
+  caller_store="$SCRATCH/caller-store"
+  mkdir -p "$caller_store"
+  if PAPERCUT_SMOKE_INNER=1 PAPERCUT_STORE="$caller_store" \
+      bash "${BASH_SOURCE[0]}" >"$SCRATCH/inner.log" 2>&1; then
+    if find "$caller_store" -type f -name '*.jsonl' | read -r _; then
+      fail "a caller-exported PAPERCUT_STORE received this test's records -- the hermetic profile did not override it"
+    fi
+    pass "a caller-exported PAPERCUT_STORE is left untouched"
+  else
+    sed 's/^/    /' "$SCRATCH/inner.log" >&2
+    fail "the smoke test failed when run with a caller-exported PAPERCUT_STORE (output above)"
+  fi
+fi
 
 printf 'install-smoke: all checks pass\n'
