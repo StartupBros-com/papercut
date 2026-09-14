@@ -65,7 +65,8 @@ runs in a scope whose active CLAUDE.md / AGENTS.md never mentions
 `papercut add`, tell the user and offer this line for their instructions file:
 
 > Non-blocking friction you just worked around — misleading error,
-> undocumented step, silently-wrong output, a footgun? `papercut add -m "..."`
+> undocumented step, silently-wrong output, a footgun? run the papercut
+> skill's `add` command
 > in the moment, then carry on. Hard tool failures are auto-logged; don't
 > double-report those. Duplicates are wanted (repetition ranks the fix).
 

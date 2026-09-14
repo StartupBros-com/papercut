@@ -18,7 +18,7 @@ const { spawnSync } = require('node:child_process');
 const { runHook, assertPassThrough, mkTmp, rmTmp, HOOKS_DIR } = require('./lib/harness');
 
 const HOOK = 'papercut-log.js';
-const { signature, projectSlug, redact } = require('../../hooks/papercut-log.js');
+const { signature, projectSlug, redact, redactThenTrim } = require('../../hooks/papercut-log.js');
 
 const CWD = '/srv/app/demo';
 
@@ -94,6 +94,74 @@ test('redaction: a Stripe key and a bearer token in a failure payload never reac
     assert.ok(!raw.includes('sk_live_51H8xAbCdEfGhIjKlMnOp'), 'Stripe live key leaked into the store');
     assert.match(raw, /<redacted>/);
   } finally { rmTmp(home); }
+});
+
+test('redaction: the bounded URI-credential rule still redacts (pins the {1,64} bound)', () => {
+  // The bound replaced an unbounded `+` to kill quadratic backtracking. The
+  // claim at the patch site is that bounding "cannot lose a match". Nothing in
+  // this suite pinned it: reverting both bounds in the shipped hook left all
+  // tests green, because the only credential URI exercised used a short scheme
+  // that matches either way. These cases fail if the bound is removed OR
+  // tightened past a realistic scheme.
+  const cases = [
+    'postgres://admin:s3cr3tp4ssw0rd@db.internal:5432/app',
+    'https://user:hunter2hunter2@example.com/path',
+    'git+ssh://deploy:tok3nv4lue123@git.example.com/repo.git',
+  ];
+  for (const input of cases) {
+    const out = redact(input);
+    assert.match(out, /<redacted>@/, `URI credential survived: ${input} -> ${out}`);
+  }
+});
+
+test('redaction: the bounded credential-name rule still redacts (pins the {0,64} bound)', () => {
+  // This pattern had NO coverage at all, and it is the one whose prefix bound
+  // changed from `*` to {0,64}. The long-prefix case is the one a too-tight
+  // bound would break.
+  const cases = [
+    ['PGPASSWORD=supersecretvalue', 'supersecretvalue'],
+    ['GITHUB_TOKEN: ghp_abcdefghijklmnop', 'ghp_abcdefghijklmnop'],
+    ['MY_SERVICE_API_KEY="k3yv4lu3abcdef"', 'k3yv4lu3abcdef'],
+    // a prefix right at the bound's edge
+    ['A'.repeat(60) + '_SECRET=abcdefghijkl', 'abcdefghijkl'],
+  ];
+  for (const [input, secret] of cases) {
+    const out = redact(input);
+    assert.ok(!out.includes(secret),
+      `credential survived redact(): ${input} -> ${out}`);
+  }
+});
+
+test('redaction: a long non-matching body stays linear (pins the ReDoS fix)', () => {
+  // The defect the bounds exist for: an unbounded quantifier in front of an
+  // alternation is retried at every start position, which is quadratic. One
+  // rule took 40.2s on a 40k-character run of word characters. This asserts a
+  // generous ceiling -- it is a ReDoS tripwire, not a benchmark.
+  // Tuned against measured values rather than guessed. On this engine a 100k
+  // run of word characters costs ~16ms with the bounds and ~6600ms without --
+  // a 400x separation. A first attempt used a 40k body and a 2000ms ceiling,
+  // which the UNBOUNDED pattern passed at ~1030ms: the tripwire asserted
+  // nothing. 500ms keeps ~30x headroom for a slow CI box while still failing
+  // an unbounded quantifier by better than 10x.
+  const body = 'a'.repeat(100000);
+  const started = process.hrtime.bigint();
+  redact(body);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 500,
+    `redact() took ${elapsedMs.toFixed(0)}ms on a 100k body -- a quantifier bound was lost`);
+});
+
+test('redaction: a credential straddling MAX_INPUT_CHARS is not written unredacted', () => {
+  // Slicing before redacting let a key lose enough trailing characters to fall
+  // under a pattern's minimum length and pass through intact. Measured: an
+  // AKIA-shaped key with 4-11 characters left after the cut survived.
+  const key = 'AKIAIOSFODNN7EXAMPLE';
+  for (const keep of [4, 6, 10, 11, 14, 20]) {
+    const pad = '. '.repeat(1200).slice(0, 2000 - keep);
+    const out = redactThenTrim(pad + key + ' trailing');
+    assert.ok(!/AKIA[A-Z0-9]{4,}/.test(out),
+      `a straddling credential survived with ${keep} chars kept: ...${out.slice(-40)}`);
+  }
 });
 
 // --- 3. store path: the hook and the CLI agree ----------------------------

@@ -24,7 +24,6 @@ trap 'rm -rf "$SCRATCH"' EXIT
 # caused rather than preventing it. Resolve the caller's store once, for the
 # containment assertion, then remove the variable so no child inherits it.
 CALLER_STORE="${PAPERCUT_STORE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/papercuts}"
-CALLER_STORE_WAS_SET="${PAPERCUT_STORE:+yes}"
 unset PAPERCUT_STORE
 
 pass() { printf 'PASS - %s\n' "$1"; }
@@ -286,10 +285,16 @@ pass "a second, independent profile sees none of the first profile's records"
 # 6. Regression: a caller-exported PAPERCUT_STORE must not receive this test's
 #    records. Guarded by a sentinel so the re-invocation runs exactly once.
 # ---------------------------------------------------------------------------
-if [ -z "${PAPERCUT_SMOKE_INNER:-}" ]; then
+# The sentinel is a NONCE minted by this run, not a bare flag. A plain
+# PAPERCUT_SMOKE_INNER=1 inherited from the caller's environment used to skip
+# this whole section while the script still printed "all checks pass" -- a
+# silent pass inside the very test that exists to prevent silent passes.
+SMOKE_NONCE="${PAPERCUT_SMOKE_EXPECT:-smoke-$$-${RANDOM:-0}}"
+if [ "${PAPERCUT_SMOKE_INNER:-}" != "$SMOKE_NONCE" ]; then
   caller_store="$SCRATCH/caller-store"
   mkdir -p "$caller_store"
-  if PAPERCUT_SMOKE_INNER=1 PAPERCUT_STORE="$caller_store" \
+  if PAPERCUT_SMOKE_INNER="$SMOKE_NONCE" PAPERCUT_SMOKE_EXPECT="$SMOKE_NONCE" \
+      PAPERCUT_STORE="$caller_store" \
       bash "${BASH_SOURCE[0]}" >"$SCRATCH/inner.log" 2>&1; then
     if find "$caller_store" -type f -name '*.jsonl' | read -r _; then
       fail "a caller-exported PAPERCUT_STORE received this test's records -- the hermetic profile did not override it"

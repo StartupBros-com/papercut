@@ -40,16 +40,42 @@ python3 scripts/check_no_private_refs.py || { echo "sanitizer FAILED" >&2; exit 
 python3 scripts/check_stdlib_only.py || { echo "stdlib check FAILED" >&2; exit 1; }
 
 printf '%s\n' "$VERSION" > VERSION
+# All FOUR version sites, not two. check_version_consistency.py treats VERSION
+# as the authority and fails on any disagreement, so bumping a subset produced a
+# release branch that could never go green -- the guard and the tool that feeds
+# it disagreed about how many files exist.
 python3 - "$VERSION" <<'PY'
-import json, pathlib, sys
+import json, pathlib, re, sys
+new = sys.argv[1]
+
 p = pathlib.Path(".claude-plugin/plugin.json")
 d = json.loads(p.read_text())
-d["version"] = sys.argv[1]
+d["version"] = new
 p.write_text(json.dumps(d, indent=2) + "\n")
-print("bumped ->", sys.argv[1])
+
+p = pathlib.Path("pyproject.toml")
+t = p.read_text()
+t2, n = re.subn(r'^version\s*=\s*"[^"]+"', 'version = "%s"' % new, t, count=1, flags=re.M)
+if n != 1:
+    sys.exit("pyproject.toml: no version line to bump")
+p.write_text(t2)
+
+p = pathlib.Path("papercut/__init__.py")
+t = p.read_text()
+t2, n = re.subn(r'^__version__\s*=\s*"[^"]+"', '__version__ = "%s"' % new, t, count=1, flags=re.M)
+if n != 1:
+    sys.exit("papercut/__init__.py: no __version__ line to bump")
+p.write_text(t2)
+
+print("bumped ->", new)
 PY
 
-git add -A hooks VERSION .claude-plugin/plugin.json papercut tests skills scripts README.md
+# Fail here rather than in CI: a release branch that cannot go green is worse
+# than no release branch.
+python3 scripts/check_version_consistency.py || {
+  echo "version sites disagree after the bump" >&2; exit 1; }
+
+git add -A hooks VERSION .claude-plugin/plugin.json pyproject.toml papercut tests skills scripts README.md
 if git diff --cached --quiet; then echo "nothing to commit (already released?)" >&2; exit 1; fi
 git commit -q -m "release: v$VERSION" -F "$BODY"
 git push -q -u origin "$BRANCH"

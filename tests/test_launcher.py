@@ -70,8 +70,10 @@ class LauncherHelpTest(unittest.TestCase):
             result = run_launcher(["--help"], cwd=tmp, store=store)
             self.assertEqual(result.returncode, 0, result.stderr)
             # These are the real subcommands argparse registers in papercut/cli.py
-            # main(); asserting on them catches both "launcher can't find the
-            # package at all" and "launcher found some other papercut".
+            # main(). This case runs in an EMPTY cwd, so on its own it only
+            # catches "launcher can't find the package at all" -- the
+            # shadowing case needs a competing package actually present, which
+            # test_a_papercut_package_in_the_cwd_cannot_shadow_the_plugin builds.
             for subcommand in ("add", "list", "triage", "rollup", "family", "show"):
                 self.assertIn(
                     subcommand, result.stdout,
@@ -124,6 +126,60 @@ class LauncherExitStatusTest(unittest.TestCase):
              tempfile.TemporaryDirectory(prefix="papercut-launcher-store-") as store:
             result = run_launcher(["list", "--json"], cwd=tmp, store=store)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class LauncherShadowingTest(unittest.TestCase):
+    """A package named `papercut` in the caller's cwd must not win.
+
+    THE DEFECT THIS PINS: the launcher used to run `python3 -m papercut` with
+    the plugin root merely prepended to PYTHONPATH. CPython inserts the
+    caller's working directory at sys.path[0] for -m, AHEAD of PYTHONPATH, so
+    any customer repo that happened to contain a `papercut/` directory ran ITS
+    code instead of the plugin's -- exit 0, wrong program, no error. That is
+    both the opposite of the launcher's stated guarantee and an
+    arbitrary-code-execution path on the documented happy path.
+
+    Demonstrated 2026-09-14 against the shipped launcher: a decoy
+    papercut/__main__.py in an unrelated cwd printed its own output and exited
+    0. Every launcher test passed at the time, because none of them put a
+    competing package in the cwd.
+    """
+
+    def decoy(self, root: Path) -> None:
+        pkg = root / "papercut"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "__main__.py").write_text(
+            'import sys\nprint("DECOY-MAIN")\nsys.exit(0)\n', encoding="utf-8")
+        (pkg / "cli.py").write_text(
+            'def main():\n    print("DECOY-CLI")\n    return 0\n', encoding="utf-8")
+
+    def test_a_papercut_package_in_the_cwd_cannot_shadow_the_plugin(self):
+        with tempfile.TemporaryDirectory(prefix="papercut-shadow-") as tmp, \
+             tempfile.TemporaryDirectory(prefix="papercut-shadow-store-") as store:
+            self.decoy(Path(tmp))
+            result = run_launcher(["--help"], cwd=tmp, store=store)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("DECOY", result.stdout,
+                             "a papercut package in the cwd shadowed the plugin")
+            # And it really is the plugin's own CLI that answered.
+            for subcommand in ("add", "list", "triage", "rollup"):
+                self.assertIn(subcommand, result.stdout, result.stdout)
+
+    def test_shadowing_cwd_still_writes_to_the_real_plugin_store(self):
+        """The hijack is not just cosmetic: prove the SHIPPED code ran by
+        checking it produced a real record the shipped CLI can read back."""
+        with tempfile.TemporaryDirectory(prefix="papercut-shadow2-") as tmp, \
+             tempfile.TemporaryDirectory(prefix="papercut-shadow2-store-") as store:
+            self.decoy(Path(tmp))
+            added = run_launcher(
+                ["add", "-m", "shadowed cwd must not win", "--sig", "shadow-test", "-q"],
+                cwd=tmp, store=store)
+            self.assertEqual(added.returncode, 0, added.stderr)
+            listed = run_launcher(["list", "--days", "1"], cwd=tmp, store=store)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertIn("shadow-test", listed.stdout, listed.stdout)
+            self.assertNotIn("DECOY", listed.stdout, listed.stdout)
 
 
 class LauncherSymlinkTest(unittest.TestCase):

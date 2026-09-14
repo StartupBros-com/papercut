@@ -132,7 +132,7 @@ Standalone use captures nothing until the hook is registered. The plugin's
 | `triage [--days N]` | Draft evidence dossiers for flagged families |
 | `adopt <family>` | Validate a completed dossier and file it, once |
 | `family <create\|assign\|show\|escalate\|dispose\|reopen\|...>` | Append-only family lifecycle |
-| `staleness` | Is capture still alive? (for a weekly scheduled check) |
+| `staleness` | Is capture still alive? Run it when you want to check. |
 
 Run any command with `-h` for its full flags.
 
