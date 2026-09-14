@@ -56,16 +56,25 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 127
 fi
 
-# Put the plugin root (which contains the papercut/ package directory) on
-# PYTHONPATH so `python3 -m papercut` finds it regardless of cwd or of
-# whether the package was ever installed.
-if [ -n "${PYTHONPATH:-}" ]; then
-  PYTHONPATH="$plugin_root:$PYTHONPATH"
-else
-  PYTHONPATH="$plugin_root"
-fi
-export PYTHONPATH
-
-# exec replaces this shell process with python3, so the CLI's own exit
-# status (not the shell's) is what the caller sees.
-exec python3 -m papercut "$@"
+# Deliberately NOT `python3 -m papercut` with a PYTHONPATH prepend.
+#
+# CPython inserts the caller's working directory at sys.path[0] for -m, AHEAD
+# of anything PYTHONPATH contributes. So a customer repo that merely contains a
+# directory named `papercut/` silently wins, and the launcher runs THAT instead
+# of this plugin -- which is both the opposite of what this script exists to
+# guarantee and an arbitrary-code-execution path on the documented happy path.
+# Demonstrated 2026-09-14: a decoy papercut/__main__.py dropped in an unrelated
+# cwd printed its own output and exited 0 through this launcher.
+#
+# -P / PYTHONSAFEPATH would fix it from 3.11, but pyproject declares >=3.10, so
+# the bound has to hold without them. This bootstrap replaces sys.path[0] -- the
+# cwd entry itself -- with the plugin root, so the plugin's own package is the
+# only one reachable by that name.
+#
+# exec replaces this shell process with python3, so the CLI's own exit status
+# (not the shell's) is what the caller sees.
+exec python3 -c 'import sys
+sys.path[0:1] = [sys.argv.pop(1)]
+sys.argv[0] = "papercut"
+from papercut.cli import main
+sys.exit(main())' "$plugin_root" "$@"

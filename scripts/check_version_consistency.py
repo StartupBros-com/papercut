@@ -30,6 +30,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Scoped to the [project] table, not the first `version =` anywhere in the
+# file. An unscoped search returned a decoy line placed before [project] and
+# reported "ok" while the real [project].version was stale.
+class _NoTable:
+    """Stands in for a missing [project] table so the caller reports a
+    drift rather than crashing on None."""
+    def group(self, _n):
+        return ""
+
+
+PYPROJECT_PROJECT_TABLE_RE = re.compile(
+    r"^\[project\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
 PYPROJECT_VERSION_RE = re.compile(
     r'^\s*version\s*=\s*"([^"]+)"\s*$', re.MULTILINE
 )
@@ -53,7 +65,9 @@ def read_pyproject() -> str:
     # other top-level `version = "..."` assignment, so a plain regex avoids
     # depending on tomllib (stdlib only from 3.11, but pyproject.toml declares
     # requires-python = ">=3.10").
-    match = PYPROJECT_VERSION_RE.search(text)
+    match = PYPROJECT_VERSION_RE.search(
+        (PYPROJECT_PROJECT_TABLE_RE.search(text) or _NoTable()).group(1)
+    )
     if not match:
         raise ValueError("pyproject.toml: no `version = \"...\"` line found under [project]")
     return match.group(1)

@@ -1177,6 +1177,74 @@ class TestStaleness(PapercutBase):
             capture_output=True, text=True, timeout=30, check=False, env=env,
         ).stdout
 
+    def test_a_scan_that_read_nothing_is_not_reported_as_an_idle_profile(self):
+        """The second door into the same false verdict.
+
+        The cap fix guarded the gap comparison, but `newest_session == 0`
+        early-returned "no session activity to compare against" before
+        consulting it. A scan that observed NOTHING -- because every transcript
+        raised, or because the budget was zero -- then read as a benign idle
+        profile while capture may have been dead.
+        """
+        import unittest.mock as _mock
+        home = Path(tempfile.mkdtemp(prefix="papercut-home-unread-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        proj = home / ".claude" / "projects" / "-p"
+        proj.mkdir(parents=True)
+        (proj / "live.jsonl").write_text('{"type": "user"}\n', encoding="utf-8")
+        self.write("-p", [self.rec()])
+
+        real_stat = Path.stat
+
+        def unreadable(self, *a, **k):
+            if self.name == "live.jsonl":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *a, **k)
+
+        with _mock.patch.object(Path, "stat", unreadable):
+            newest, incomplete = PC.newest_transcript_activity(
+                home / ".claude" / "projects")
+        self.assertEqual(newest, 0.0)
+        self.assertTrue(
+            incomplete,
+            "an unreadable transcript must mark the scan incomplete, exactly as "
+            "running out of scan budget does -- both understate newest_session")
+
+    def test_a_zero_scan_budget_is_rejected_rather_than_silently_idle(self):
+        """`--max-transcript-scan 0` used to reach the idle-profile branch and
+        report a healthy-looking result on a provably stale store."""
+        out = self.staleness("--max-transcript-scan", "0")
+        self.assertNotIn("no session activity", out)
+        self.assertNotIn("healthy", out)
+
+    def test_an_unreadable_store_is_not_reported_as_an_unregistered_hook(self):
+        """An I/O error on the store is not an empty store, and the empty-store
+        message sends the reader to check hook registration -- the wrong
+        place entirely."""
+        import unittest.mock as _mock
+        home = Path(tempfile.mkdtemp(prefix="papercut-home-badstore-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        proj = home / ".claude" / "projects" / "-p"
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text('{"type": "user"}\n', encoding="utf-8")
+        self.write("-p", [self.rec()])
+
+        real_stat = Path.stat
+
+        def unreadable_store(self, *a, **k):
+            if self.parent == PC.STORE:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *a, **k)
+
+        buf = io.StringIO()
+        with _mock.patch.object(Path, "stat", unreadable_store), \
+             contextlib.redirect_stdout(buf):
+            PC.cmd_staleness(argparse.Namespace(
+                max_gap_hours=72.0, max_transcript_scan=None))
+        out = buf.getvalue()
+        self.assertIn("could not be read", out)
+        self.assertNotIn("store is EMPTY", out)
+
     def test_a_capped_scan_never_reports_health(self):
         """The defect: an incomplete scan printed an unqualified "healthy".
 

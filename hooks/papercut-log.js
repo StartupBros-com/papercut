@@ -64,6 +64,20 @@ const MAX_ERR_CHARS = 400;
 // timeouts fail CLOSED, stall the session. Nothing downstream needs more than
 // this: err is stored at MAX_ERR_CHARS and the signature keys on one line.
 const MAX_INPUT_CHARS = 2000;
+// Redaction runs over a WIDER window than the cap, then the result is trimmed.
+// Slicing first and redacting after let a credential straddling the cutoff lose
+// enough trailing characters to fall under a pattern's minimum length and pass
+// through intact: measured 2026-09-14, an AKIA-shaped key with 4-11 characters
+// left after the slice was written to the store unredacted, while the same key
+// in the untruncated text redacted correctly. The margin is longer than any
+// credential shape these rules match. It costs nothing now that every pattern
+// is bounded -- the quadratic blow-up that motivated truncate-first is gone.
+const REDACT_MARGIN_CHARS = 512;
+
+function redactThenTrim(value) {
+  return redact(String(value).slice(0, MAX_INPUT_CHARS + REDACT_MARGIN_CHARS))
+    .slice(0, MAX_INPUT_CHARS);
+}
 const MAX_RECORD_BYTES = 3072; // < PIPE_BUF (4096) so the O_APPEND write stays atomic
 const MAX_LOG_BYTES = 32 * 1024 * 1024; // stop growing rather than fill the disk
 
@@ -473,10 +487,11 @@ function record(input) {
   if (String(input.tool_name) === 'Bash' && isContentFree(rawErr)) return null;
 
   // Signature is computed on redacted text so a secret can never reach a key
-  // that ends up in an issue title. Truncate first — see MAX_INPUT_CHARS.
-  const err = redact(rawErr.slice(0, MAX_INPUT_CHARS));
-  const cmd = redact(String(rawCmd).slice(0, MAX_INPUT_CHARS));
-  const target = redact(String(rawTarget).slice(0, MAX_INPUT_CHARS));
+  // that ends up in an issue title. Redact first, then trim — see
+  // REDACT_MARGIN_CHARS for why the order matters.
+  const err = redactThenTrim(rawErr);
+  const cmd = redactThenTrim(rawCmd);
+  const target = redactThenTrim(rawTarget);
 
   const rec = {
     ts: new Date().toISOString(),
@@ -573,7 +588,7 @@ function logDenial({ guard, cwd, sessionId, agentId, tool, command, reason }) {
   try {
     // Truncate BEFORE the regex work — this runs inside a guard's synchronous
     // deny path, where an unbounded input would stall enforcement. See MAX_INPUT_CHARS.
-    const err = redact(String(reason || '').slice(0, MAX_INPUT_CHARS));
+    const err = redactThenTrim(reason || '');
 
     // A PreToolUse payload frequently carries NO session_id and NO cwd — measured
     // 2026-08-06 on live data: 239 of 251 guard records (95%) had both empty, which
@@ -605,7 +620,7 @@ function logDenial({ guard, cwd, sessionId, agentId, tool, command, reason }) {
       sig: guard ? `guard_blocked:${SUBJ(String(guard).toLowerCase())}` : signature(err, tool),
       tool: String(tool || 'unknown').slice(0, 40),
       err: err.slice(0, MAX_ERR_CHARS),
-      cmd: redact(String(command || '').slice(0, MAX_INPUT_CHARS)).slice(0, 200),
+      cmd: redactThenTrim(command || '').slice(0, 200),
       cwd: String(dir || '').slice(0, 200),
       session: sid,
       // Same 8-char convention as the capture path; empty for the main conversation.
@@ -687,7 +702,7 @@ function readLimitRepeatHint(input, storeFile) {
   if (!target) return null;
   const session = String(input.session_id || '').slice(-8);
   const seen = repeatCount(storeFile, session, target,
-    signature(redact(err.slice(0, MAX_INPUT_CHARS)), input.tool_name, target),
+    signature(redactThenTrim(err), input.tool_name, target),
     String(input.agent_id || '').slice(-8));
   if (seen < REPEAT_THRESHOLD) return null;
   return ('Attempt ' + seen + ' on this file in this session: it cannot be '
@@ -862,7 +877,7 @@ function run(rawInput) {
 }
 
 module.exports = {
-  run, signature, normalize, projectSlug, redact, signalLine, isContentFree,
+  run, signature, normalize, projectSlug, redact, redactThenTrim, signalLine, isContentFree,
   appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape, workspaceBinHint, esmTestHint,
   storeDir,
 };

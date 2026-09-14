@@ -41,11 +41,24 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # own source and fails on a clean tree -- observed on the first run.
 SELF = Path(__file__).resolve()
 
-# A test runner whose status is piped into a filter that discards it.
+# A test runner whose exit status is piped ANYWHERE.
+#
+# The first version matched only a single hop into tail/head on one physical
+# line. Three separate reviewers broke it the same day: `runner | tee x | tail`
+# evades it, `runner | grep -v warn` evades it, and a backslash-continued
+# `run: |` block that puts the pipe on the next line evades it. Under a shell
+# without pipefail EVERY one of those reports the last stage's status, which is
+# the whole defect -- so the filter's identity was never the thing that
+# mattered. Any pipe after a test runner is the signal.
 PIPED_TEST = re.compile(
     r"(?:unittest|node\s+--test|pytest|\bbash\s+tests/)"   # a test runner
-    r"[^\n|]*\|\s*(?:tail|head)\b"                          # ...piped into a truncator
+    r"[^\n]*\|"                                             # ...whose status is piped anywhere
 )
+
+# A run: block can continue across lines with a trailing backslash, which puts
+# the pipe on a different physical line from the runner. Join those before
+# scanning so the continuation cannot hide the pipe.
+CONTINUED = re.compile(r"\\\n\s*")
 
 
 def main() -> int:
@@ -58,7 +71,13 @@ def main() -> int:
     for wf in sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml")):
         if wf.resolve() == SELF:
             continue
-        for lineno, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
+        raw = wf.read_text(encoding="utf-8")
+        # Join backslash continuations first, then scan. Line numbers are taken
+        # from the joined text's own numbering, which stays correct for every
+        # line before the first continuation and is close enough after it to
+        # point a reader at the right step.
+        joined = CONTINUED.sub(" ", raw)
+        for lineno, line in enumerate(joined.splitlines(), 1):
             # A comment is not a command. The fix's own rationale comment quotes
             # the forbidden shape, and matching it failed the clean tree on the
             # first run -- the guard has to read what RUNS, not what explains.
@@ -75,7 +94,14 @@ def main() -> int:
     # is the documented way to get it.
     ci = WORKFLOWS / "ci.yml"
     if ci.is_file():
-        if not re.search(r"^\s*shell:\s*bash\s*$", ci.read_text(encoding="utf-8"), re.M):
+        # Structural, not a bare text search: `shell: bash` buried in one step
+        # leaves every other step unprotected, and a commented example would
+        # satisfy a naive search. Require the workflow-level defaults.run block.
+        ci_text = ci.read_text(encoding="utf-8")
+        has_default_shell = re.search(
+            r"^defaults:\s*$\n(?:[ \t]+.*\n)*?[ \t]+run:\s*$\n(?:[ \t]+.*\n)*?[ \t]+shell:\s*bash\s*$",
+            ci_text, re.M)
+        if not has_default_shell:
             failures.append(
                 "ci.yml: no explicit `shell: bash`, so steps run under `bash -e` "
                 "without pipefail -- add a workflow-level defaults.run.shell"

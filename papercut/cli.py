@@ -1063,6 +1063,17 @@ def cmd_resolve(args: argparse.Namespace) -> None:
 STALENESS_TRANSCRIPT_SCAN_CAP = 5000
 
 
+def positive_int(value: str) -> int:
+    """A scan budget of zero is not a small scan, it is no scan at all, and it
+    used to reach the 'no session activity' branch and report a healthy-looking
+    idle profile. Reject it where it enters rather than defending every branch
+    downstream."""
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be 1 or greater")
+    return n
+
+
 def newest_transcript_activity(root: Path, cap: int | None = None) -> tuple[float, bool]:
     """The newest mtime among `root`'s `<project>/<session>.jsonl` transcripts,
     and whether the scan hit its cap before finishing.
@@ -1074,29 +1085,41 @@ def newest_transcript_activity(root: Path, cap: int | None = None) -> tuple[floa
     """
     limit = STALENESS_TRANSCRIPT_SCAN_CAP if cap is None else cap
     newest = 0.0
-    capped = False
+    # "incomplete", not "capped": a scan that could not READ a transcript
+    # understates newest_session exactly as much as one that ran out of budget,
+    # and the verdict depends only on whether the observed maximum is the true
+    # one. Swallowing OSError while leaving this False was the second door into
+    # the same false-healthy verdict the cap was fixed for -- a PermissionError
+    # on the newest transcript returned (0.0, False), which cmd_staleness read
+    # as a COMPLETE scan of an idle profile.
+    incomplete = False
     scanned = 0
     if not root.is_dir():
-        return newest, capped
+        return newest, incomplete
+    # Iterated lazily, not materialized: the cap bounds stat() calls, and a
+    # profile with a pathological number of project directories should not pay
+    # to build the whole list before the cap is ever consulted.
     try:
-        project_dirs = [d for d in root.iterdir() if d.is_dir()]
+        project_dirs = root.iterdir()
     except OSError:
-        return newest, capped
+        return newest, True
     for d in project_dirs:
-        try:
-            transcripts = list(d.glob("*.jsonl"))
-        except OSError:
+        if not d.is_dir():
             continue
-        for fp in transcripts:
-            if scanned >= limit:
-                capped = True
-                return newest, capped
-            scanned += 1
-            try:
-                newest = max(newest, fp.stat().st_mtime)
-            except OSError:
-                pass
-    return newest, capped
+        try:
+            transcripts = d.glob("*.jsonl")
+            for fp in transcripts:
+                if scanned >= limit:
+                    return newest, True
+                scanned += 1
+                try:
+                    newest = max(newest, fp.stat().st_mtime)
+                except OSError:
+                    incomplete = True
+        except OSError:
+            incomplete = True
+            continue
+    return newest, incomplete
 
 
 def cmd_staleness(args: argparse.Namespace) -> None:
@@ -1105,12 +1128,16 @@ def cmd_staleness(args: argparse.Namespace) -> None:
     never refreshed; this is the check that shape needs.
     """
     newest_cut = 0.0
+    store_unreadable = False
     if STORE.is_dir():
         for fp in STORE.glob("*.jsonl"):
             try:
                 newest_cut = max(newest_cut, fp.stat().st_mtime)
             except OSError:
-                pass
+                # An unreadable store is not an empty one, and the message
+                # below tells the reader the hook may not be registered --
+                # advice that sends them to the wrong place entirely.
+                store_unreadable = True
     # Same profile the store itself resolves through (PAPERCUT_STORE, then
     # CLAUDE_CONFIG_DIR/papercuts, then ~/.claude/papercuts) — reusing
     # claude_config_dir() here instead of a second Path.home() lookup is what
@@ -1121,7 +1148,23 @@ def cmd_staleness(args: argparse.Namespace) -> None:
     newest_session, session_scan_capped = newest_transcript_activity(projects, scan_cap)
 
     if newest_session == 0:
+        if session_scan_capped:
+            # A scan that observed nothing has not established that nothing
+            # happened. Reported as "no session activity", a capped-to-zero or
+            # wholly unreadable scan reads as a benign idle profile while
+            # capture may be dead -- the same conversion of an unanswerable
+            # question into a confident answer the cap fix removed downstream.
+            print("WARN papercut capture: INSUFFICIENT EVIDENCE — the transcript scan "
+                  "ended without reading any session activity (scan cap "
+                  f"{scan_cap or STALENESS_TRANSCRIPT_SCAN_CAP}, or the transcripts "
+                  "could not be read). This is NOT evidence that no sessions ran.")
+            return
         print("papercut capture: no session activity to compare against")
+        return
+    if newest_cut == 0 and store_unreadable:
+        print("WARN papercut capture: the store could not be read (permission or I/O "
+              "error) — this is NOT the same as an empty store, and the hook may be "
+              "working fine. Check the store's permissions before changing anything.")
         return
     if newest_cut == 0:
         print("WARN papercut capture: sessions are running but the store is EMPTY "
@@ -2614,10 +2657,14 @@ def dispatch_handoff_line(family: str, snapshot: dict) -> str:
         status = "claimed — a session holds it, excluded from ready work"
     elif "blocked" in labels:
         status = "blocked — excluded from ready work"
-    elif "the dispatch-ready label" in labels:
-        status = "tagged the dispatch-ready label — intake-eligible once an external readiness check clears it"
+    elif DISPATCH_READY_LABEL and DISPATCH_READY_LABEL in labels:
+        status = (f"tagged {DISPATCH_READY_LABEL} — intake-eligible once an external readiness check "
+                  f"clears it")
     else:
-        status = "awaiting operator the dispatch-ready label tag"
+        # Reads the CONFIGURED label rather than a hardcoded one. The literal
+        # happened to equal this harness's value, so the branch worked here and
+        # silently never matched for any other configuration.
+        status = f"awaiting operator {DISPATCH_READY_LABEL or 'dispatch'} tag"
     return f"  {family}: {status} — {url}"
 
 
@@ -4008,7 +4055,7 @@ def main() -> None:
     st.add_argument("--max-gap-hours", type=float, default=72.0)
     # Named by the insufficient-evidence message, which would otherwise tell
     # the reader to run something that does not exist.
-    st.add_argument("--max-transcript-scan", type=int,
+    st.add_argument("--max-transcript-scan", type=positive_int,
                     default=STALENESS_TRANSCRIPT_SCAN_CAP,
                     help="stat at most this many transcripts (default "
                          f"{STALENESS_TRANSCRIPT_SCAN_CAP}); raise it when the scan reports insufficient evidence")
