@@ -920,6 +920,47 @@ class TestRedaction(PapercutBase):
         plain = "/bin/bash: line 1: pytest: command not found"
         self.assertEqual(PC.redact(plain), plain)
 
+    def test_redacting_a_long_word_character_body_stays_linear(self):
+        r"""the source harness#1069: unbounded greedy prefixes made this quadratic.
+
+        A long unbroken run of word characters is exactly what an authored
+        dossier section looks like to this scanner, and
+        test_an_over_limit_rendered_body_is_refused_before_any_create writes
+        40,000 of them. With `[\w-]*` in front of the keyword alternation that
+        one rule took 40.2s, and cmd_adopt redacts about fifty times per
+        dossier, so a single adopt burned 142s of CPU. That was 77% of this
+        whole suite and part of what pushed the CI job past its 20-minute
+        ceiling.
+
+        The bound here is deliberately loose, 5s against a measured 0.1s, so
+        this pins the complexity class rather than becoming a flaky stopwatch.
+        """
+        import time
+
+        body = "x" * 40_000
+        start = time.perf_counter()
+        out = PC.redact(body)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(out, body, "a body with no credential must come back unchanged")
+        self.assertLess(
+            elapsed, 5.0,
+            f"redact() on 40,000 word characters took {elapsed:.1f}s; a greedy "
+            "unbounded prefix has probably been reintroduced",
+        )
+
+    def test_a_name_longer_than_the_bound_is_still_redacted(self):
+        """The {0,64} bound shortens the capture; it must not lose the match.
+
+        The engine still tries every start position, so a name longer than the
+        bound matches later in the name instead of not at all. This is the
+        planted negative for the bound: if it ever anchors, this fails.
+        """
+        name = "a_very_long_prefix_that_exceeds_sixty_four_characters_in_total_length_password"
+        self.assertGreater(len(name), 64)
+        out = PC.redact(name + "=hunter2hunter2")
+        self.assertNotIn("hunter2hunter2", out)
+        self.assertIn("<redacted>", out)
+
     def test_add_redacts_before_writing(self):
         env = dict(os.environ, PAPERCUT_STORE=str(self.store))
         subprocess.run(
@@ -1057,18 +1098,47 @@ class TestClosedIssueHandling(PapercutBase):
 
 class TestStaleness(PapercutBase):
     """HOME is isolated in every test here: cmd_staleness reads
-    $HOME/.claude/projects, so without it these read the real machine and the
-    result depends on whatever sessions happen to be running."""
+    $HOME/.claude/projects (or CLAUDE_CONFIG_DIR/projects when that's set), so
+    without isolating both these read the real machine and the result depends
+    on whatever sessions happen to be running.
 
-    def staleness(self, *argv, sessions=True):
+    Every fixture writes a real transcript FILE under the project directory,
+    not just the bare directory: cmd_staleness's activity signal is the
+    transcript's own mtime (defect 2 -- it used to be the parent directory's,
+    which an append does not necessarily bump), and every helper here
+    back-dates that parent directory by default precisely to prove the
+    directory mtime is not what's being read.
+    """
+
+    def staleness(self, *argv, sessions=True, config_dir=None,
+                  session_mtime=None, dir_mtime=None):
         home = Path(tempfile.mkdtemp(prefix="papercut-home-"))
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        projects = home / ".claude" / "projects"
+        base = config_dir or (home / ".claude")
+        projects = base / "projects"
         projects.mkdir(parents=True)
         if sessions:
-            (projects / "-some-project").mkdir()
+            proj_dir = projects / "-some-project"
+            proj_dir.mkdir(parents=True)
+            transcript = proj_dir / "session-1.jsonl"
+            transcript.write_text('{"type": "user"}\n', encoding="utf-8")
+            if session_mtime is not None:
+                os.utime(transcript, (session_mtime, session_mtime))
+            # Back-date the directory itself, independent of the file inside
+            # it -- the exact split defect 2 collapsed by reading only the
+            # directory's mtime.
+            backdated = dir_mtime if dir_mtime is not None else time.time() - 30 * 86400
+            os.utime(proj_dir, (backdated, backdated))
         env = dict(os.environ, PAPERCUT_STORE=str(self.store),
                    HOME=str(home), USERPROFILE=str(home))
+        if config_dir is not None:
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        else:
+            # Never let an ambient CLAUDE_CONFIG_DIR (set in some dev/CI
+            # shells) leak into a test that isn't exercising it -- that would
+            # silently point the check at a real profile instead of the
+            # isolated fixture, the same class of bug defect 1 fixes.
+            env.pop("CLAUDE_CONFIG_DIR", None)
         return subprocess.run(
             [sys.executable, str(PAPERCUT), "staleness", *argv],
             capture_output=True, text=True, timeout=30, check=False, env=env,
@@ -1098,6 +1168,62 @@ class TestStaleness(PapercutBase):
         os.utime(self.store / "-p.jsonl", (old, old))
         out = self.staleness("--max-gap-hours", "1")
         self.assertIn("WARN papercut capture stale", out)
+
+    def test_store_near_cap_warns_alongside_the_gap_verdict(self):
+        # No prior test pinned this warning at all; confirm the refactor
+        # around it (moving the negative-gap branch in) left it firing.
+        self.write("-p", [self.rec()])
+        with open(self.store / "-p.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("x" * int(PC.MAX_LOG_BYTES * 0.85))
+        out = self.staleness()
+        self.assertIn("WARN papercut store near cap", out)
+
+    def test_active_session_under_custom_config_dir_is_not_dismissed(self):
+        # Defect 1: cmd_staleness hardcoded Path.home()/".claude"/"projects",
+        # ignoring CLAUDE_CONFIG_DIR entirely. On a profile using a custom
+        # config dir, an ACTIVE session with a real transcript used to be
+        # invisible to the check, which claimed there was nothing to compare
+        # against -- when what should actually fire is the empty-store
+        # warning below, because the store really is empty here.
+        config_dir = Path(tempfile.mkdtemp(prefix="papercut-config-"))
+        self.addCleanup(shutil.rmtree, config_dir, ignore_errors=True)
+        out = self.staleness(config_dir=config_dir)
+        self.assertNotIn("no session activity", out)
+        self.assertIn("WARN papercut capture", out)
+        self.assertIn("EMPTY", out)
+
+    def test_transcript_file_mtime_is_the_signal_not_the_directory(self):
+        # Defect 2 reproduction with the numbers from the report: a transcript
+        # appended just now, a capture record last updated 24h ago, and a
+        # project directory whose own mtime hasn't moved in 48h. Reading the
+        # directory's mtime (the old behavior) makes the "newest session"
+        # look OLDER than the capture record, producing a NEGATIVE gap that
+        # printed as healthy. Reading the transcript file itself (the fix)
+        # correctly sees a session active right now, 24h ahead of the record,
+        # and must call that stale, never healthy, and never with a bare
+        # negative number standing in for "healthy".
+        self.write("-p", [self.rec()])
+        record_cut = time.time() - 24 * 3600
+        os.utime(self.store / "-p.jsonl", (record_cut, record_cut))
+        out = self.staleness("--max-gap-hours", "1",
+                             session_mtime=time.time(), dir_mtime=time.time() - 48 * 3600)
+        self.assertIn("WARN papercut capture stale", out)
+        self.assertNotIn("healthy", out)
+        self.assertNotRegex(out, r"-\d+(\.\d+)?h")
+
+    def test_negative_gap_from_clock_skew_never_reads_as_healthy(self):
+        # Even with the file-level signal, a capture record newer than the
+        # newest transcript is still possible (clock skew, a future mtime).
+        # That must be called out explicitly, never printed as a clean bill
+        # of health with an unexplained negative number.
+        self.write("-p", [self.rec()])
+        skewed_future = time.time() + 6 * 3600
+        os.utime(self.store / "-p.jsonl", (skewed_future, skewed_future))
+        out = self.staleness(session_mtime=time.time())
+        self.assertNotIn("healthy", out)
+        self.assertIn("WARN", out)
+        self.assertIn("AHEAD", out)
+        self.assertNotRegex(out, r"-\d+(\.\d+)?h")
 
 
 class TestHelpers(unittest.TestCase):
@@ -2486,7 +2612,7 @@ class TestVerificationLifecycle(PapercutBase):
         self.assertIn("verified", out)
         self.assertIn("store-wide capture session(s)", out)
         self.assertIn("pre-closure baseline", out)
-        self.assertIn("the fixed mechanism itself was not measured", out)
+        self.assertIn("fix-specific execution was not measured", out)
 
     def test_a_verifying_family_shows_how_far_it_is_from_the_floor(self):
         """Without the running count, a family headed for `provisional` with zero
@@ -2720,6 +2846,13 @@ class TestVerificationLifecycle(PapercutBase):
         self.assertIn("verified", out)
         self.assertIn("crossed floor", out)
         self.assertIn("7-day minimum met", out)
+        # Defect 3: the early-verified line used to carry NO qualifier at all,
+        # the larger overclaim of the two "verified" branches -- it read as
+        # stronger evidence than a full-window verified line, when it is
+        # actually weaker (less elapsed exposure). Store-wide capture activity
+        # only proves capture was alive and saw no recurrence, never that the
+        # repaired operation itself ran again.
+        self.assertIn("fix-specific execution was not measured", out)
 
     def test_a_verifying_family_names_days_left_to_the_minimum_once_the_floor_is_crossed(self):
         self.assign("fast-floor", "member")
@@ -4703,6 +4836,32 @@ class TestDispatchHandoff(PapercutBase):
     Dispatch state is derived from the labels the refresh pass already reads
     and printed, never stored. The plain read path keeps making no gh call.
     """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_dispatch_label = PC.DISPATCH_READY_LABEL
+        # This whole surface only exists where a queue is configured, and the
+        # handoff block is gated on that. State the precondition rather than
+        # inheriting it from a default: the packaged copy ships no queue, so a
+        # test that relies on the default passes here and fails there, which is
+        # a test asserting the configuration rather than the behavior.
+        PC.DISPATCH_READY_LABEL = "the dispatch-ready label"
+
+    def tearDown(self):
+        PC.DISPATCH_READY_LABEL = self._saved_dispatch_label
+        super().tearDown()
+
+    def test_no_configured_queue_prints_no_handoff_block(self):
+        """The symmetric case, which is the packaged default.
+
+        Without a queue there is no boundary for an item to sit at, so naming
+        one would describe another team's machinery at someone who has none.
+        """
+        PC.DISPATCH_READY_LABEL = ""
+        self.seed_four_states()
+        out, status = self.rollup(refresh=True)
+        self.assertEqual(status, 0)
+        self.assertNotIn("dispatch handoff:", out)
 
     def assign(self, family, *sigs):
         for sig in sigs:

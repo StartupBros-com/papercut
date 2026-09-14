@@ -293,3 +293,83 @@ Two further facts the build settled:
    `papercut)` arm added to `expected_source_url()` in
    `scripts/validate-marketplace.sh` — the validator rejects any slug not
    explicitly allowlisted there.
+
+## 2026-09-14 — the ownership question, assessed and sequenced
+
+An audit of the published package proposed inverting the generation direction:
+`papercut` would own the CLI, hooks, family logic, skill and tests, while the
+harness would keep only configuration, private guard integration and scheduling.
+This section records the assessment, because the answer is "yes, but not first",
+and a deferred decision with no written reason gets re-litigated.
+
+### The harm that motivated it is real, and it was measured
+
+The bounded-redaction fix merged into the harness on 2026-09-08. On 2026-09-14
+the marketplace card still pinned `3b1ee28` (v0.1.18, released 2026-09-02), so
+the fix had not reached a single customer twelve days later. That is not a
+hypothetical packaging risk; it is a shipped defect with a known repair sitting
+unshipped.
+
+Its size, measured the same day by running the identical suite against both
+trees on one machine, warm cache on both sides:
+
+| tree | redaction patterns | suite wall-clock |
+|---|---|---|
+| shipped v0.1.18 | unbounded | **171.1s** |
+| re-vendored | bounded `{1,64}` / `{0,64}` | **7.4s** |
+
+The suite is a proxy, not a customer operation — it is stated here as
+corroboration, not as the user-facing number. The user-facing cost is the one
+already recorded at the patch site: a single unbounded rule took 40.2s against a
+40,000-character body, and `cmd_adopt` calls `redact()` about fifty times per
+dossier.
+
+### But the harm is a release-process gap, not an ownership gap
+
+Nothing about generating the package from the harness prevents vendoring on
+merge. What was missing is a check that notices the source has moved ahead of
+the shipped tree. `papercut-vendor.py` already computes the would-be output, so
+detecting drift is a comparison, not a new mechanism. **Fixing the ownership
+model would not have caught this; a freshness check would.** That check is the
+cheap repair and it is the one to do first.
+
+### What inverting ownership would actually buy
+
+The transform does two jobs, and only one of them disappears:
+
+1. **Sanitization — this is the real prize.** The debt grows monotonically:
+   172 → 183 hits across twenty merges, because every comment that justifies a
+   fix cites its evidence, and citations are exactly what cannot ship. Written
+   public-first, that debt tends to zero. A transform keeps translating it
+   forever.
+2. **Config defaults — these do not disappear.** `KNOWN_GUARDS`,
+   `DISPATCH_READY_LABEL`, `DISPATCH_DOCS_REF` and `WORK_SPEC_SECTIONS` encode a
+   genuine difference between two installations. Inverting ownership moves that
+   work; it does not remove it. The Stage 1 override layer above is already the
+   correct home for it, and it already works.
+
+So the flip is worth doing for reason 1 alone, and reason 2 is unaffected either
+way. That is a narrower case than "the packaging boundary is the problem", and
+it should be argued on its actual merit.
+
+### What it would cost
+
+`test_papercut.py` is 5,064 lines carrying the largest share of the
+private-reference debt; it would have to be rewritten public-first rather than
+translated. The harness's live store, family history and adopted-item locators
+must survive unchanged. Private guard integrations must keep working. And there
+must remain exactly one active capture path — a migration that leaves both the
+harness hook and the plugin hook live would double-log into the same store,
+which is the same split-brain class as the `PAPERCUT_STORE` defect this document
+already records.
+
+### Sequencing
+
+1. **Now:** the freshness check, so a merged fix cannot sit unshipped again.
+2. **Now:** the customer-artifact smoke tests, which this pass adds.
+3. **Then, and not before:** the ownership flip — because its safety rests
+   entirely on being able to prove the packaged artifact still works across the
+   move, and that proof did not exist until step 2.
+
+Recorded without claiming step 3 is scheduled. It is justified, it is not
+urgent, and the measured harm that prompted it is closed by step 1.

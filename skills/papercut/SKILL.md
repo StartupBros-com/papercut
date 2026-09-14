@@ -9,7 +9,7 @@ Friction you route around silently is friction nobody ever fixes. This is the
 cheap write path for it.
 
 **Hard tool failures are already captured automatically** by the
-`PostToolUseFailure` hook (`hooks/PostToolUseFailure/papercut-log.js`) — nonzero
+`PostToolUseFailure` hook (`hooks/papercut-log.js`) — nonzero
 exits, missing commands, timeouts, guard blocks, ENOENT. Do **not** self-report
 those; it is duplicate work and costs tokens the hook does not.
 
@@ -25,15 +25,19 @@ class automation cannot see:
 
 ## Log one
 
+Every command below runs through this plugin's own launcher, so it works
+with no global install and no `PATH` setup. The launcher resolves its own
+location, so a symlink to it from anywhere on your `PATH` works too.
+
 ```bash
-papercut add -m "what you were doing → what got in the way (+ a guess at cause/fix)"
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" add -m "what you were doing → what got in the way (+ a guess at cause/fix)"
 ```
 
 One or two sentences. A guess at the cause or fix is a bonus, not required.
 Example:
 
 ```bash
-papercut add -m "Ran a-cli query --dim page,query to get a page's search terms; totals were 22 impressions against 13,834 on the page. Row limit truncates server-side without warning — --page returns the real 285 queries."
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" add -m "Ran a-cli query --dim page,query to get a page's search terms; totals were 22 impressions against 13,834 on the page. Row limit truncates server-side without warning — --page returns the real 285 queries."
 ```
 
 Log it **in the moment and keep working**. It is not blocking, it does not need
@@ -48,7 +52,7 @@ never aggregate and neither ever crosses the rollup threshold. If
 `papercut list --days 30` already shows a signature that matches, pass it:
 
 ```bash
-papercut add --sig guard_blocked:a-command-guard -m "a-command-guard blocked a truncating redirect into \$A_JOB_DIR/tmp, which the background-job instructions tell agents to use"
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" add --sig guard_blocked:a-command-guard -m "a-command-guard blocked a truncating redirect into \$A_JOB_DIR/tmp, which the background-job instructions tell agents to use"
 ```
 
 That one flag is the difference between a note nobody reads and a ranked issue.
@@ -85,7 +89,7 @@ If it is blocking, it is not a papercut — fix it or raise it.
 Before unfamiliar or risky work in a repo, spend one command:
 
 ```bash
-papercut list --cwd "$PWD" --days 30
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --cwd "$PWD" --days 30
 ```
 
 The log is a cache, not just a report — someone (possibly you, last week) may
@@ -102,21 +106,22 @@ captured, say so in the prompt.
 ## Review what has accumulated
 
 ```bash
-papercut list --days 7 -v          # ranked by distinct sessions
-papercut list --quarantined        # junk fingerprints (needs fingerprinting, not fixes)
-papercut show <signature>          # every occurrence of one signature
-papercut rollup --days 7           # what is over threshold (report only)
-papercut rollup --days 7 --apply   # legacy route: file/update unassigned raw-signature issues
-papercut resolve <signature>       # fixed — hide it until it recurs
-papercut staleness                 # is capture still alive?
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --days 7 -v          # ranked by distinct sessions
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --quarantined        # junk fingerprints (needs fingerprinting, not fixes)
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" show <signature>          # every occurrence of one signature
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --days 7           # what is over threshold (report only)
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --days 7 --apply   # legacy route: file/update unassigned raw-signature issues
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" resolve <signature>       # fixed — hide it until it recurs
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" staleness                 # is capture still alive?
 ```
 
 `resolve` is not permanent silence: if a resolved signature happens again after
 the fix, that is a regression and it comes straight back. Use it freely.
 
-`a weekly scheduled run` already runs the report-only rollup every Monday and nags via
-the Windows toast when anything is over threshold, so the log cannot quietly
-become write-only. `--apply` stays a deliberate legacy operator step for
+Nothing here schedules itself. `rollup --days 7` stays report-only until
+something runs it -- wire it into whatever schedule this repo already uses
+(cron, a CI job) if you want a standing check; the plugin ships no timer and
+no notification of its own. `--apply` stays a deliberate step for
 unassigned raw signatures; once a family exists, use the clinic below.
 
 ## Run the clinic
@@ -130,18 +135,18 @@ Create and assign the family before triage. Use one family for the causal
 cluster, not one family per spelling of its raw signature.
 
 ```bash
-papercut family create <family>               # a short causal name, e.g. worktree-isolation
-papercut family assign <family> <signature>   # repeat per member; membership is reversible
-papercut family show <family>                 # what is folded in right now
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family create <family>               # a short causal name, e.g. worktree-isolation
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family assign <family> <signature>   # repeat per member; membership is reversible
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family show <family>                 # what is folded in right now
 ```
 
 Run triage, write the judgment half of each selected dossier, then adopt one
 completed family.
 
 ```bash
-papercut triage --days 30       # write dossier drafts for flagged families (3 by default)
-papercut adopt <family>         # validate the completed dossier and file it, once
-papercut adopt <family> --json  # same, emitting the confirmed locator
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" triage --days 30       # write dossier drafts for flagged families (3 by default)
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" adopt <family>         # validate the completed dossier and file it, once
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" adopt <family> --json  # same, emitting the confirmed locator
 ```
 
 Triage also lists the top unfamilied flagged signatures — high-volume raw
@@ -175,11 +180,10 @@ jargon. Adopt renders it at the top of the filed issue and collapses the full
 dossier into a details block below it, so write it for someone who has never
 seen this tool.
 
-Adopt never applies `the dispatch-ready label` — filing a work item and admitting it to the
-an autonomous queue's autonomous lane are two separate acts. The label itself is
-human-admitted: the operator's tag, or a session tagging specific work the
-operator explicitly approved in that same session (amended 2026-08-28; the
-full rule lives in `docs/your queue's documentation`).
+Adopt only files or updates the work item. It never applies a label, assigns
+an owner, or hands the item to any automation — the plugin ships nothing to
+hand it to. What happens after that is whatever process this repo already
+runs on its own issues.
 
 ### Adopt local work; escalate upstream work
 
@@ -188,8 +192,8 @@ Route from the dossier's owner class. For `local-defect` or `target-repo`, use
 report yourself and record its URL instead:
 
 ```bash
-papercut family escalate <family> --to https://upstream.example/issues/123
-papercut family escalate <family> --to https://upstream.example/issues/123 \
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family escalate <family> --to https://upstream.example/issues/123
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family escalate <family> --to https://upstream.example/issues/123 \
     -n "optional local context"
 ```
 
@@ -199,22 +203,7 @@ its live window volume under `escalated upstream`. Recurrence is expected and
 never comments on or reopens the upstream report. Use `family reopen` to undo
 the escalation, or `family dispose` to retire it finally.
 
-**After adopt, the handoff is the operator's.** Tagging a filed work-spec
-issue `the dispatch-ready label` is the one act that puts it in the an autonomous queue's intake
-filter. Adopt says so on success, and the weekly rollup's `dispatch handoff:`
-section shows where adopted-open items stand — awaiting the tag, tagged,
-claimed by a session, or blocked. Every state is a label fact read live
-during `rollup --refresh`, never stored, and never an inferred outcome:
-final readiness (native dependency blockers included) is `an external readiness check`'s
-call, `claimed` is the shared cross-session claim signal rather than proof
-of a an autonomous queue run, and the trivial route's pull request sits outside the
-intake entirely — an external readiness check reads issues only. The section covers up to the
-refresh read cap (`--limit`, default 10) per run; the quiet tail rotates
-oldest-checked first, so anything past the cap surfaces on a later run.
-Whether ticks fire by hand or on the timer is the an autonomous queue's own ratchet
-ladder (`docs/an autonomous queue-ratchets.md`), not this tool's.
-
-**Keep the queue at the operator's keep-rate, not the backlog's size.** The
+**Keep open work at the operator's keep-rate, not the backlog's size.** The
 cap defaults to 3; pass `--cap N` to override it. It counts all open
 papercut-originated work items: the loop's recorded adoption locators that are
 still open, unioned with open issues filed by legacy `rollup --apply`,
@@ -234,9 +223,9 @@ Fill the causal hypothesis, strongest counterexample, owner class, and
 No-Claim Boundary, then record the verdict. Reopen reverses that disposition.
 
 ```bash
-papercut family dispose <family> --verdict intended-policy
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family dispose <family> --verdict intended-policy
 #   verdicts: intended-policy | insufficient-evidence | upstream-reported
-papercut family reopen <family>   # reverses it, restoring the retained dossier
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family reopen <family>   # reverses it, restoring the retained dossier
 ```
 
 Dispose retains a redacted copy of the dossier in its own event, and reopen
@@ -251,14 +240,14 @@ adopted or disposed; reopen it first.
 ### Close the loop
 
 Adoption is not the end of the family. Record what upstream did with the work
-item, and the weekly rollup reports a recurrence instead of filing a duplicate.
+item, and the next `rollup` run reports a recurrence instead of filing a duplicate.
 
 ```bash
-papercut family unassign <family> <signature>   # reversible; leaves an audit event
-papercut family close-observed <family> \
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family unassign <family> <signature>   # reversible; leaves an audit event
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family close-observed <family> \
     --repo owner/repo --kind issue --number 123 \
     --url https://github.com/owner/repo/issues/123 --state closed
-papercut family recur-comment <family>          # comment once on a closed recurrence
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family recur-comment <family>          # comment once on a closed recurrence
 ```
 
 `close-observed` records a local observation of one work item's state; it is
@@ -286,7 +275,7 @@ comments cannot be read, the run skips that family rather than risk one.
 `rollup --apply` also honours a global open-work cap, shared with `adopt`:
 
 ```bash
-papercut rollup --apply --cap 3   # default; --cap -1 disables the check
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --apply --cap 3   # default; --cap -1 disables the check
 ```
 
 The cap counts open labeled issues *and* pull requests across every repository
@@ -301,9 +290,9 @@ observation, `rollup` and `family show` both carry a verification stage,
 recomputed from the store on every read:
 
 ```bash
-papercut rollup --days 7                    # the stage rides the weekly report
-papercut family show                        # every family's stage at a glance
-papercut family show <family> --window 60   # widen the verification window
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --days 7                    # the verification stage shows up here too
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family show                        # every family's stage at a glance
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" family show <family> --window 60   # widen the verification window
 ```
 
 | stage | what it means |
@@ -374,13 +363,6 @@ pretending otherwise manufactures a permanent false `regressed`.
 - gate — `an external work-item validator`; non-zero exit means do not file it.
 - defect — OBSERVED: the papercut pipeline dead-ended at a weekly report; signatures were ranked and reported, and nothing carried judgment forward into tracked work.
 - delete-when — its draft is deleted when the family is adopted (the body lives in the filed item) or disposed (the verdict event carries the digest, plus a redacted copy of the body for reopen). Adopt and dispose each delete only after their own event is durably appended, so a crash loses the draft only once the record that replaces it is safe.
-
-`a weekly scheduled run` invokes `$HOME/.claude/bin/papercut.py`, not a worktree
-copy, and that path is a symlink into the canonical main checkout. The clinic
-is not live for the weekly report or for an ambient `papercut` invocation
-until that checkout pulls the merge — the weekly report only ever reads the
-installed copy — so run it from a worktree as `python3 claude/bin/papercut.py`
-until then.
 
 ## Mining a whole session
 

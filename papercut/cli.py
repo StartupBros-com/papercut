@@ -3,7 +3,7 @@
 
 Two capture paths feed one per-project JSONL store:
 
-  auto  PostToolUseFailure hook (hooks/PostToolUseFailure/papercut-log.js) records
+  auto  PostToolUseFailure hook (hooks/papercut-log.js) records
         every hard tool failure. Zero tokens, 100% compliance, no agent judgment.
   self  `papercut add -m "..."` — the class with NO error signature: confusing
         docs, a misleading-but-successful command, a working-but-wrong tool, a
@@ -138,7 +138,7 @@ def die(msg: str) -> None:
 
 
 # Credential shapes scrubbed before anything is written or sent to GitHub. Kept in
-# sync with REDACTIONS in hooks/PostToolUseFailure/papercut-log.js — the two
+# sync with REDACTIONS in hooks/papercut-log.js — the two
 # capture paths must not disagree about what is safe to store. Redaction happens
 # at CAPTURE, not at read: the store is a plain file and `rollup --apply` copies
 # sample text into an issue body, so a secret must never land in either.
@@ -161,10 +161,28 @@ REDACTIONS = [
     (re.compile(r"\b((?:sk|pk|rk)_(?:live|test)_)\w{8,}"), r"\1<redacted>"),
     (re.compile(r"\b(AIza)[\w-]{20,}"), r"\1<redacted>"),                        # Google API key
     (re.compile(r"\b(eyJ[\w-]{6,})\.[\w-]{6,}\.[\w-]{6,}\b"), r"\1.<redacted>"),  # bare JWT
-    (re.compile(r"([\w+.-]+)://([^\s:@/]+):([^\s@/]+)@"), r"\1://\2:<redacted>@"),
+    # {1,64} rather than +: the leading run is a URI scheme, which is short.
+    # Unbounded, it costs 4.4s on a 40,000-character run of word characters
+    # (measured 2026-09-08) for the same reason as the rule below.
+    (re.compile(r"([\w+.-]{1,64})://([^\s:@/]+):([^\s@/]+)@"), r"\1://\2:<redacted>@"),
     # No leading \b: the secret-bearing name is usually PREFIXED (PGPASSWORD,
     # MYSQL_PWD, GITHUB_TOKEN), and \b would anchor past the prefix and miss it.
-    (re.compile(r"([\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key"
+    #
+    # {0,64} rather than *: an unbounded greedy run in front of an alternation
+    # is retried at every start position, which is quadratic in the body
+    # length. Measured 2026-09-08 against a 40,000-character run of word
+    # characters, this one rule took 40.2s, and cmd_adopt calls redact() about
+    # fifty times per dossier -- so one adopt burned 142s of CPU, which is 77%
+    # of the whole python suite and part of what pushed the CI job past its
+    # 20-minute ceiling (the source harness#1069).
+    #
+    # Bounding cannot lose a match. The engine still attempts every start
+    # position, so a name longer than the bound still matches at a later start;
+    # only group 1 is shorter, and the characters it no longer captures are
+    # left untouched in the surrounding text rather than dropped. Verified
+    # byte-identical output on four bodies and seven credential fixtures,
+    # including an 87-character name, at 0.09s instead of 28.3s.
+    (re.compile(r"([\w-]{0,64}(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key"
                 r"|private[_-]?key))([\"']?\s*[:=]\s*[\"']?)[^\s\"',;&)]{4,}", re.I),
      r"\1\2<redacted>"),
 ]
@@ -215,7 +233,7 @@ def newer_than(record_ts, boundary) -> bool:
 KNOWN_GUARDS: tuple[str, ...] = ()
 
 
-# Mirrors WRAPPER_LINE/signalLine() in hooks/PostToolUseFailure/papercut-log.js.
+# Mirrors WRAPPER_LINE/signalLine() in hooks/papercut-log.js.
 # Operator-facing output must show the line the classifier actually keyed on; the
 # Bash tool prefixes failures with its own `Exit code N`, so displaying the literal
 # first line showed "Exit code 1" for every Bash record while the real error sat on
@@ -1021,6 +1039,54 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         print(f"reopened: {args.sig}")
 
 
+# A profile can accumulate a project directory per repo/worktree ever touched
+# and a transcript file per session ever run inside it, none of it rotated. The
+# staleness check only needs the SINGLE newest mtime among them, but finding
+# that means stat-ing every transcript unless the walk is bounded. Cap it: stop
+# after this many files, in directory-listing order. A file missed past the cap
+# can only make `newest_session` look OLDER than the true newest transcript,
+# which can only make the gap look LARGER — the same direction as a real stale
+# hook, never the direction that would hide one. 5000 is generous headroom over
+# a typical profile (low hundreds of projects, low thousands of transcripts
+# total) while still bounding the pathological case.
+STALENESS_TRANSCRIPT_SCAN_CAP = 5000
+
+
+def newest_transcript_activity(root: Path) -> tuple[float, bool]:
+    """The newest mtime among `root`'s `<project>/<session>.jsonl` transcripts,
+    and whether the scan hit its cap before finishing.
+
+    Directory mtime is NOT a substitute: appending to an existing transcript
+    file does not necessarily bump its parent directory's mtime, so a session
+    active right now can sit under a project directory untouched for days.
+    Only the transcript files themselves carry the real signal.
+    """
+    newest = 0.0
+    capped = False
+    scanned = 0
+    if not root.is_dir():
+        return newest, capped
+    try:
+        project_dirs = [d for d in root.iterdir() if d.is_dir()]
+    except OSError:
+        return newest, capped
+    for d in project_dirs:
+        try:
+            transcripts = list(d.glob("*.jsonl"))
+        except OSError:
+            continue
+        for fp in transcripts:
+            if scanned >= STALENESS_TRANSCRIPT_SCAN_CAP:
+                capped = True
+                return newest, capped
+            scanned += 1
+            try:
+                newest = max(newest, fp.stat().st_mtime)
+            except OSError:
+                pass
+    return newest, capped
+
+
 def cmd_staleness(args: argparse.Namespace) -> None:
     """Is capture still alive? Silence is ambiguous — it means either 'no friction'
     or 'the hook died'. A sibling indexing tool exited 0 daily for 21 days while its index silently
@@ -1033,21 +1099,21 @@ def cmd_staleness(args: argparse.Namespace) -> None:
                 newest_cut = max(newest_cut, fp.stat().st_mtime)
             except OSError:
                 pass
-    projects = Path.home() / ".claude" / "projects"
-    newest_session = 0.0
-    if projects.is_dir():
-        for d in projects.iterdir():
-            try:
-                newest_session = max(newest_session, d.stat().st_mtime)
-            except OSError:
-                pass
+    # Same profile the store itself resolves through (PAPERCUT_STORE, then
+    # CLAUDE_CONFIG_DIR/papercuts, then ~/.claude/papercuts) — reusing
+    # claude_config_dir() here instead of a second Path.home() lookup is what
+    # keeps this check asking about the profile that's actually active instead
+    # of always defaulting to the home one.
+    projects = claude_config_dir() / "projects"
+    newest_session, session_scan_capped = newest_transcript_activity(projects)
 
     if newest_session == 0:
         print("papercut capture: no session activity to compare against")
         return
     if newest_cut == 0:
         print("WARN papercut capture: sessions are running but the store is EMPTY "
-              "— is the PostToolUseFailure hook registered? (your config sync reconcile-papercut-hook)")
+              "— is the PostToolUseFailure hook registered? Check that the papercut "
+              "plugin is enabled.")
         return
     gap_h = (newest_session - newest_cut) / 3600.0
     # Oversized stores stop accepting writes silently; surface that as the same alarm.
@@ -1058,11 +1124,23 @@ def cmd_staleness(args: argparse.Namespace) -> None:
                       f"of {MAX_LOG_BYTES // 1048576}MB — writes stop SILENTLY at the cap; prune or rotate")
         except OSError:
             pass
-    if gap_h > args.max_gap_hours:
+    if gap_h < 0:
+        # A record newer than the newest transcript activity is clock skew or a
+        # future mtime, not evidence of anything -- printing it as "healthy"
+        # with a negative number reads as a clean bill of health when the two
+        # clocks actually disagree and neither side of the comparison can be
+        # trusted.
+        print(f"WARN papercut capture: newest record is {-gap_h:.1f}h AHEAD of the newest "
+              f"session activity — clock skew or a future mtime, not a clean bill of health")
+    elif gap_h > args.max_gap_hours:
         print(f"WARN papercut capture stale: newest record is {gap_h:.0f}h older than the "
               f"newest session (threshold {args.max_gap_hours}h) — capture may be dead")
     else:
         print(f"papercut capture: healthy (newest record {gap_h:.1f}h behind newest session)")
+    if session_scan_capped:
+        print(f"WARN papercut staleness: transcript scan stopped at "
+              f"{STALENESS_TRANSCRIPT_SCAN_CAP} files — newest-session time may be "
+              f"understated, which only biases this check toward stale, never toward healthy")
 
 
 def read_records(days: int, project: str | None = None, *,
@@ -2987,13 +3065,19 @@ def verification_summary(details: dict) -> str:
                     f"7-day minimum")
         return line
     if stage == "verified":
+        # Store-wide capture activity proves capture was alive and saw no
+        # recurrence -- never that the repaired operation specifically ran
+        # again. Both branches below carry the same caveat so neither implies
+        # more than the store can say (early verification used to omit it
+        # entirely, the larger overclaim of the two).
+        caveat = ("no recurrence observed under active capture; "
+                  "fix-specific execution was not measured")
         if details.get("verified_early"):
             return (f"verified — exposure {details['exposure_sessions']} "
                     f"store-wide capture session(s) crossed floor {details['floor']} "
                     f"after {details['days_elapsed']} day(s) (7-day minimum met; "
-                    f"regression reads continue to the window's end)")
-        return (f"verified — no member recurrence, {measures}; store-wide "
-                f"liveness only, the fixed mechanism itself was not measured")
+                    f"regression reads continue to the window's end); {caveat}")
+        return f"verified — {caveat} ({measures})"
     return (f"provisional — quiet, but only {measures}; "
             f"silence without exposure proves nothing")
 
@@ -3559,7 +3643,10 @@ def cmd_rollup(args: argparse.Namespace) -> None:
     # human boundary -- an adopted item is dispatchable the moment the
     # operator tags it `the dispatch-ready label`, and until this line existed nothing showed
     # which items were sitting at that boundary.
-    if dispatch_snapshot:
+    # Gated on a configured queue for the same reason the adopt guidance is:
+    # with no queue there is no boundary to sit at, and an installation
+    # without one was being shown another team's intake vocabulary.
+    if dispatch_snapshot and DISPATCH_READY_LABEL:
         print("dispatch handoff:")
         for family in sorted(dispatch_snapshot):
             print(dispatch_handoff_line(family, dispatch_snapshot[family]))
@@ -3871,20 +3958,20 @@ def main() -> None:
     a.add_argument("-q", "--quiet", action="store_true")
     a.set_defaults(func=cmd_add)
 
-    l = sub.add_parser("list", help="ranked signatures in the window")
-    l.add_argument("--days", type=int, default=7)
-    l.add_argument("--cwd", help="restrict to the project owning this directory (use \"$PWD\")")
-    l.add_argument("--project", help="restrict to one project slug (e.g. -home-user-SITES-example-project); "
-                                     "prefer --cwd, which derives it for you")
-    l.add_argument("--limit", type=int, default=30)
-    l.add_argument("--json", action="store_true")
-    l.add_argument("-v", "--verbose", action="store_true")
-    l.add_argument("--include-resolved", action="store_true",
-                   help="also show signatures marked resolved")
-    l.add_argument("--quarantined", action="store_true",
-                   help="show ONLY quarantined junk-fingerprint signatures (the "
-                        "fingerprinting backlog; excluded from the default view)")
-    l.set_defaults(func=cmd_list)
+    ls = sub.add_parser("list", help="ranked signatures in the window")
+    ls.add_argument("--days", type=int, default=7)
+    ls.add_argument("--cwd", help="restrict to the project owning this directory (use \"$PWD\")")
+    ls.add_argument("--project", help="restrict to one project slug (e.g. -home-user-SITES-example-project); "
+                                      "prefer --cwd, which derives it for you")
+    ls.add_argument("--limit", type=int, default=30)
+    ls.add_argument("--json", action="store_true")
+    ls.add_argument("-v", "--verbose", action="store_true")
+    ls.add_argument("--include-resolved", action="store_true",
+                    help="also show signatures marked resolved")
+    ls.add_argument("--quarantined", action="store_true",
+                    help="show ONLY quarantined junk-fingerprint signatures (the "
+                         "fingerprinting backlog; excluded from the default view)")
+    ls.set_defaults(func=cmd_list)
 
     rv = sub.add_parser("resolve", help="mark a signature fixed; hides it until it recurs")
     rv.add_argument("sig")
@@ -3894,7 +3981,7 @@ def main() -> None:
                     help="window used to report what is being suppressed (default 30d)")
     rv.set_defaults(func=cmd_resolve)
 
-    st = sub.add_parser("staleness", help="is capture still alive? (for a weekly scheduled run)")
+    st = sub.add_parser("staleness", help="is capture still alive?")
     st.add_argument("--max-gap-hours", type=float, default=72.0)
     st.set_defaults(func=cmd_staleness)
 

@@ -52,8 +52,13 @@ const path = require('path');
 
 const MAX_ERR_CHARS = 400;
 // Truncate BEFORE redact()/signature(), never after. Several REDACTIONS patterns
-// are O(n^2) on long non-matching input — benchmarked 2026-08-06: 50K chars
-// ~900ms, 100K ~7.1s, 1MB did not finish in five minutes. Since logDenial() runs
+// WERE O(n^2) on long non-matching input — benchmarked 2026-08-06: 50K chars
+// ~900ms, 100K ~7.1s, 1MB did not finish in five minutes. That was an unbounded
+// greedy prefix in two of them, fixed at the root on 2026-09-08 (the source harness#1069)
+// after the same two patterns, uncorrected in the python copy of this table
+// which does not truncate, cost 142s on a single 40,000-character dossier.
+// This truncation stays regardless: it is the second line of defence, and the
+// reasons below stand on their own. Since logDenial() runs
 // these inside a PreToolUse guard's synchronous path, an unbounded command string
 // (a big inline script, a pasted blob) would stall the guard and, because hook
 // timeouts fail CLOSED, stall the session. Nothing downstream needs more than
@@ -98,10 +103,20 @@ const REDACTIONS = [
   [/\b((?:sk|pk|rk)_(?:live|test)_)[\w]{8,}/g, '$1<redacted>'],
   [/\b(AIza)[\w-]{20,}/g, '$1<redacted>'],                       // Google API key
   [/\b(eyJ[\w-]{6,})\.[\w-]{6,}\.[\w-]{6,}\b/g, '$1.<redacted>'], // bare JWT, no Bearer label
-  [/([\w+.-]+):\/\/([^\s:@/]+):([^\s@/]+)@/g, '$1://$2:<redacted>@'],
+  // {1,64} rather than +: the leading run is a URI scheme, which is short, and
+  // unbounded it is quadratic on long non-matching input (see MAX_INPUT_CHARS).
+  [/([\w+.-]{1,64}):\/\/([^\s:@/]+):([^\s@/]+)@/g, '$1://$2:<redacted>@'],
   // No leading \b: the secret-bearing name is usually PREFIXED (PGPASSWORD,
   // MYSQL_PWD, GITHUB_TOKEN), and \b would anchor past the prefix and miss it.
-  [/([\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))(["']?\s*[:=]\s*["']?)[^\s"',;&)]{4,}/gi,
+  //
+  // {0,64} rather than *: an unbounded greedy run in front of the alternation
+  // is retried at every start position. That is the O(n^2) the MAX_INPUT_CHARS
+  // note above measured, and the python copy of this table, which has no such
+  // truncation, spent 142s redacting one 40,000-character dossier
+  // (the source harness#1069). Bounding cannot lose a match: every start position is
+  // still attempted, so a longer name matches later in itself and only the
+  // captured group is shorter. Truncation stays as the second line of defence.
+  [/([\w-]{0,64}(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))(["']?\s*[:=]\s*["']?)[^\s"',;&)]{4,}/gi,
     '$1$2<redacted>'],
 ];
 
