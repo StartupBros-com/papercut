@@ -520,6 +520,14 @@ class TestDispatchGuidance(unittest.TestCase):
             PC.print_adopt_next_step({"kind": kind})
         return buf.getvalue()
 
+    def test_the_default_configures_no_queue(self):
+        # No queue is configured out of the box: nothing is printed after an
+        # issue filing, and the pull-request route keeps its plain next step.
+        self.assertEqual(PC.DISPATCH_READY_LABEL, "")
+        self.assertEqual(self.guidance(), "")
+        self.assertEqual(self.guidance("pr"),
+                         "next: finish and merge the pull request\n")
+
     def test_no_queue_configured_says_nothing(self):
         # A stranger has no queue: silence beats instructions for machinery
         # they do not have, and a doc reference that resolves to nothing.
@@ -1552,6 +1560,27 @@ class TestQuarantineClassifier(unittest.TestCase):
             "bash:[warn] code style issues found in <n> files. "
             "run prettier with --write to fix."))
 
+    def test_advisory_rewrite_receipts_are_quarantined(self):
+        # Live keys from 2026-10-16; each rewrite let the call run.
+        for sig in ("guard_blocked:shape-rewrite:pkgmgr",
+                    "guard_blocked:shape-rewrite:heredoc+interp",
+                    "guard_blocked:a-cost-guard:opaque-rewrite"):
+            self.assertEqual(PC.quarantine_rule(sig), "advisory-rewrite", sig)
+        # Planted negatives: a refused rewrite, the guard's real block, and the
+        # read ceiling's rewrite after repeated ignored denials are friction.
+        for sig in ("guard_blocked:shape-rewrite-refused:heredoc",
+                    "guard_blocked:a-cost-guard",
+                    "guard_blocked:read-ceiling-rewrite"):
+            self.assertIsNone(PC.quarantine_rule(sig), sig)
+
+    def test_a_failure_keyed_on_the_rewrite_receipt_is_quarantined(self):
+        self.assertEqual(PC.quarantine_rule(
+            "bash:[shape-rewrite] rewritten: pkgmgr; no action needed; original: "
+            "<path> signature: guard_blocked:shape-rewr"), "rewrite-receipt-line")
+        # Planted negative: a real failure that merely names the hook.
+        self.assertIsNone(PC.quarantine_rule(
+            "bash:error: cannot find module './claude/hooks/pretooluse/shape-rewrite.js'"))
+
     def test_census_junk_classes_are_quarantined(self):
         for sig, rule in self.JUNK.items():
             self.assertEqual(PC.quarantine_rule(sig), rule, f"junk not caught: {sig!r}")
@@ -1635,7 +1664,18 @@ class TestQuarantineRollup(PapercutBase):
         self.assertIn("papercuts-flagged:0", out)
         self.assertIn("papercuts-quarantined:0", out,
                       "the counter must print unconditionally, like papercuts-flagged")
-        self.assertNotIn("junk-fingerprint", out, "no summary line when nothing is quarantined")
+        self.assertNotIn("signature(s) quarantined", out, "no summary line when nothing is quarantined")
+
+    def test_advisory_rewrite_receipts_leave_the_fix_queue(self):
+        # Planted negative: identical sessions and counts; only the key differs.
+        self.write("-p", [self.rec(sig="guard_blocked:shape-rewrite:pkgmgr", session=f"s{i}")
+                          for i in range(5)])
+        self.write("-p", [self.rec(sig="bash:permission denied", session=f"s{i}") for i in range(5)])
+        out = self.run_rollup("--days", "7", "--min-sessions", "3", "--min-count", "3").stdout
+        self.assertIn("papercuts-flagged:1", out)
+        self.assertNotIn("shape-rewrite:pkgmgr", out, "a receipt must not reach the fix queue")
+        self.assertIn("papercuts-quarantined:1", out)
+        self.assertIn("advisory-rewrite receipts", out, "the summary line must say what the lane holds")
 
     def test_apply_never_files_a_quarantined_signature(self):
         PC.RESOLVED = self.store / "state" / "resolved.jsonl"
@@ -1700,6 +1740,13 @@ class TestQuarantineShow(PapercutBase):
         self.assertIn("occurrence(s)", out, "occurrences must still print")
         self.assertIn("no-signal-residue", out)
         self.assertIn("needs fingerprinting, not a fix", out)
+
+    def test_show_says_an_advisory_rewrite_needs_nothing(self):
+        self.write("-p", [self.rec(sig="guard_blocked:shape-rewrite:heredoc")])
+        out = self.run_show("guard_blocked:shape-rewrite:heredoc")
+        self.assertIn("[advisory-rewrite]", out)
+        self.assertIn("rewrote this call and it ran", out)
+        self.assertNotIn("needs fingerprinting", out)
 
     def test_show_of_a_coherent_signature_has_no_note(self):
         self.write("-p", [self.rec(sig="x")])

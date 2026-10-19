@@ -139,7 +139,7 @@ test('other tools, a missing store, and malformed input all fail open (and the s
     assertPassThrough(missingStoreRes, p);
 
     const res = await runHook(HOOK, '{not json', { env });
-    assert.strictEqual(res.stdout, '{not json');
+    assert.strictEqual(res.stdout, '', 'malformed input is a quiet pass-through');
     assert.strictEqual(res.code, 0);
   } finally { rmTmp(dir); }
 });
