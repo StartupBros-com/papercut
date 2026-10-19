@@ -62,8 +62,8 @@ test('capture: a hard tool failure produces a record with the expected shape', a
     assert.strictEqual(recs[0].session, '12345678', 'session is stored short (last 8)');
     assert.strictEqual(recs[0].cwd, p.cwd);
     assert.match(recs[0].ts, /^\d{4}-\d{2}-\d{2}T/, 'ts is an ISO timestamp');
-    // Always a logger, never a gate: stdin passes through unchanged.
-    assert.strictEqual(res.stdout, JSON.stringify(p));
+    // Always a logger, never a gate: a no-op writes nothing to stdout.
+    assert.strictEqual(res.stdout, '');
   } finally { rmTmp(home); }
 });
 
