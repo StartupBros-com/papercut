@@ -33,6 +33,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeHookOutput } = require('../lib/hook-output');
 
 const SCHEMA_MISMATCH = /output does not match required schema/i;
 const MISSING_PROP = /must have required property '([^']+)'/g;
@@ -196,7 +197,7 @@ if (require.main === module) {
   let data = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => { if (data.length < 1024 * 1024) data += chunk; });
-  process.stdin.on('end', () => { process.stdout.write(run(data)); process.exit(0); });
+  process.stdin.on('end', () => { writeHookOutput(run(data), data); process.exit(0); });
 }
 
 module.exports = { run, lastAttempt };

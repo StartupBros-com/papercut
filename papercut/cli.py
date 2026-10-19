@@ -1259,7 +1259,8 @@ def read_records(days: int, project: str | None = None, *,
 # they pollute ranking and `rollup --apply` files GitHub issues for them.
 # Quarantine DEFERS, never deletes — records stay in the store, the lane stays
 # visible via `list --quarantined`, and the fix is hook-side fingerprinting (each
-# graduation with a normalization regression fixture), never a `resolve`.
+# graduation with a normalization regression fixture), never a `resolve`. The
+# lane also holds advisory-rewrite receipts, which need nothing (see the rule).
 _PLACEHOLDER = re.compile(r"<(?:path|n|hex)>")
 
 
@@ -1301,6 +1302,22 @@ def quarantine_rule(sig: str) -> str | None:
     # structure, not signal -- the key lands on whichever file sorted first.
     if re.match(r"^bash:(?:total <n>$|[bcdlps-](?:[r-][w-][xst-]){3}[ .+@])", s):
         return "file-listing-line"
+    # A rewrite guard that let the call run logs a receipt through the denial
+    # channel so rewrites stay countable: `shape-rewrite:<shape>[+<shape>]` and
+    # a-cost-guard's opaque rewrite. The receipt says "no action needed", yet
+    # on 2026-10-16 the heredoc and pkgmgr keys ranked third and sixth in the
+    # 7-day fix queue. The refused form (`shape-rewrite-refused:`) and the
+    # guard's real block are friction and stay ranked.
+    if re.match(r"^guard_blocked:(?:shape-rewrite:[a-z0-9]+(?:\+[a-z0-9]+)*"
+                r"|a-cost-guard:opaque-rewrite)$", s):
+        return "advisory-rewrite"
+    # A rewritten command that then fails prints the rewrite receipt first, so
+    # the failure is keyed on the receipt instead of its cause (552 records in
+    # the 30 days to 2026-10-16). papercut-log.js now skips that line
+    # (the source harness#1840); this keeps the legacy keys already in the store, and
+    # those from sessions still running the old hook, out of the fix queue.
+    if s.startswith("bash:[shape-rewrite] rewritten:"):
+        return "rewrite-receipt-line"
     return None
 
 
@@ -1959,7 +1976,8 @@ def cmd_list(args: argparse.Namespace) -> None:
         res = read_resolutions()
         ranked = [r for r in ranked if not is_resolved(r["sig"], records, res)]
     # The lanes are exclusive: the default view is the fix queue, --quarantined
-    # is the fingerprinting backlog. Junk in the fix queue reads as work.
+    # holds the fingerprinting backlog and advisory-rewrite receipts. Either in
+    # the fix queue reads as work.
     if args.quarantined:
         ranked = [r for r in ranked if r["quarantine"]]
     else:
@@ -1972,8 +1990,9 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(f"papercuts: {lane} in the last {args.days}d")
         return
     if args.quarantined:
-        print(f"papercuts — quarantined junk fingerprints, last {args.days}d "
-              f"(needs hook-side fingerprinting, not fixes)\n")
+        print(f"papercuts — quarantined signatures, last {args.days}d "
+              f"(junk fingerprints need hook-side fingerprinting; advisory-rewrite "
+              f"receipts need nothing)\n")
     else:
         print(f"papercuts — last {args.days}d, ranked by distinct sessions\n")
     for r in ranked[: args.limit]:
@@ -1994,11 +2013,19 @@ def cmd_show(args: argparse.Namespace) -> None:
         note = f" — {ev['note']}" if ev.get("note") else ""
         print(f"[{ev.get('action', 'resolve')}d {str(ev.get('ts', ''))[:19]}]{note}\n")
     rule = quarantine_rule(args.sig)
-    quarantine_note = (
-        f"quarantined [{rule}]: this key needs fingerprinting, not a fix — it "
-        f"carries no causal signal, so it is excluded from list/rollup ranking "
-        f"(`papercut list --quarantined` shows the lane)."
-    ) if rule else None
+    quarantine_note = None
+    if rule == "advisory-rewrite":
+        quarantine_note = (
+            f"quarantined [{rule}]: the guard rewrote this call and it ran, so "
+            f"each record is a receipt, not friction; it is excluded from "
+            f"list/rollup ranking (`papercut list --quarantined` shows the lane)."
+        )
+    elif rule:
+        quarantine_note = (
+            f"quarantined [{rule}]: this key needs fingerprinting, not a fix — it "
+            f"carries no causal signal, so it is excluded from list/rollup ranking "
+            f"(`papercut list --quarantined` shows the lane)."
+        )
     if not hits:
         print(f"no occurrences of {args.sig!r} in the last {args.days}d")
         if quarantine_note:
@@ -2640,9 +2667,9 @@ def dispatch_handoff_line(family: str, snapshot: dict) -> str:
     """One adopted-open item's position relative to the an autonomous queue intake.
 
     Every status states a label fact, never an inferred outcome. The refresh
-    read sees labels only: `claimed` is the shared cross-session claim signal
-    (wt-new applies it for manual sessions too, and a stale claim persists
-    until reaped), and native dependency blockers are visible only to
+    read sees labels only: `claimed` is a leftover label (issue claims retired
+    with the source harness#1902, so nothing applies it now; an issue that still carries
+    it reads as claimed), and native dependency blockers are visible only to
     an external readiness check's own query — so this line never asserts a an autonomous queue run and
     never promises selection, it reports the tag and names the authority
     that decides the rest. A pull-request locator (the trivial adopt route)
@@ -3683,8 +3710,8 @@ def cmd_rollup(args: argparse.Namespace) -> None:
     if suppressed:
         print(f"({len(suppressed)} resolved signature(s) suppressed — `papercut list --include-resolved` to see them)")
     if quarantined:
-        print(f"({len(quarantined)} junk-fingerprint signature(s) quarantined — needs "
-              f"fingerprinting, not fixes; `papercut list --quarantined` to see them)")
+        print(f"({len(quarantined)} signature(s) quarantined — junk fingerprints or "
+              f"advisory-rewrite receipts, not fixes; `papercut list --quarantined` to see them)")
     if fixture_dropped:
         print(f"({fixture_dropped} test-fixture record(s) dropped — hook-test denial "
               f"writes: guard denials from a /tmp sandbox or the hooks tree that "
@@ -4039,8 +4066,8 @@ def main() -> None:
     ls.add_argument("--include-resolved", action="store_true",
                     help="also show signatures marked resolved")
     ls.add_argument("--quarantined", action="store_true",
-                    help="show ONLY quarantined junk-fingerprint signatures (the "
-                         "fingerprinting backlog; excluded from the default view)")
+                    help="show ONLY quarantined signatures (junk fingerprints and "
+                         "advisory-rewrite receipts; excluded from the default view)")
     ls.set_defaults(func=cmd_list)
 
     rv = sub.add_parser("resolve", help="mark a signature fixed; hides it until it recurs")

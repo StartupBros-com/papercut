@@ -108,7 +108,7 @@ captured, say so in the prompt.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --days 7 -v          # ranked by distinct sessions
-"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --quarantined        # junk fingerprints (needs fingerprinting, not fixes)
+"${CLAUDE_PLUGIN_ROOT}/scripts/papercut" list --quarantined        # junk fingerprints + advisory-rewrite receipts (not fixes)
 "${CLAUDE_PLUGIN_ROOT}/scripts/papercut" show <signature>          # every occurrence of one signature
 "${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --days 7           # what is over threshold (report only)
 "${CLAUDE_PLUGIN_ROOT}/scripts/papercut" rollup --days 7 --apply   # legacy route: file/update unassigned raw-signature issues
@@ -316,7 +316,7 @@ crossed and 7 days have passed, rather than waiting for the full window; the
 30-day window remains the horizon for regressions.
 
 A recurrence counts only when the rollup would act on it. Member signatures
-that are quarantined as junk fingerprints, or that were individually resolved
+that are quarantined (junk fingerprints, advisory-rewrite receipts), or that were individually resolved
 and have been quiet since, are already excluded from the rollup's recurrence
 lane — so the stage excludes them too. Otherwise a family could read
 `regressed` forever over a record the rollup deliberately ignores. The window

@@ -74,15 +74,16 @@ function runHook(scriptRel, payload, opts = {}) {
 }
 
 /**
- * Assert a hook ALLOWED the action by passing input through unchanged: exit 0
- * AND stdout === the exact raw input. Not the same as "no decision" — a
- * crashed hook also has no decision, so this makes a crash fail loudly
- * instead of reading as an allow.
+ * Assert a hook ALLOWED the action by passing through quietly: exit 0 AND
+ * empty stdout. A hook signals a no-op by returning its raw input unchanged,
+ * and lib/hook-output.js writes nothing for that case: an empty PreToolUse
+ * body IS the "no decision" signal, and echoing the payload back fed stdout
+ * that no reader on either side consumed. A crashed hook exits non-zero, so
+ * a crash still fails loudly instead of reading as an allow.
  */
-function assertPassThrough(res, payload) {
-  const expected = typeof payload === 'string' ? payload : JSON.stringify(payload);
+function assertPassThrough(res) {
   assert.strictEqual(res.code, 0, `expected exit 0, got ${res.code}; stderr: ${res.stderr}`);
-  assert.strictEqual(res.stdout, expected, 'expected raw input to pass through unchanged');
+  assert.strictEqual(res.stdout, '', 'expected empty stdout on a quiet pass-through');
 }
 
 /**
