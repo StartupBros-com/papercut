@@ -122,12 +122,12 @@ jobs:
         run: |
           wf=.github/workflows/release-train.yml
           test -f "$wf" || { echo "::error::missing $wf"; exit 1; }
-          grep -Fq 'hov-tool-drop-announce.yml@66e197874fe627f3d5f58dff49737e7747d20bfe' "$wf" || {
-            echo "::error::release train must call the HARDENED announce workflow pin (08f7d22f)"
+          grep -Fq 'hov-tool-drop-announce.yml@41bb6f811f1c1ad65f62c1ef32e696c60fb1d8c3' "$wf" || {
+            echo "::error::release train must call the HARDENED announce workflow pin (41bb6f81)"
             exit 1
           }
-          ! grep -Fq '08f7d22f3a5b59b1658ab2e96a20d0d3c352869c' "$wf" || {
-            echo "::error::retired announce pin c981b872 is forbidden"
+          ! grep -Fq '66e197874fe627f3d5f58dff49737e7747d20bfe' "$wf" || {
+            echo "::error::retired announce pin 66e19787 is forbidden"
             exit 1
           }
           grep -Fq "github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'" "$wf" || {

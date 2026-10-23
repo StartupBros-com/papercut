@@ -12,8 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-HARDENED_SHA='66e197874fe627f3d5f58dff49737e7747d20bfe'
-RETIRED_SHA='08f7d22f3a5b59b1658ab2e96a20d0d3c352869c'
+HARDENED_SHA='41bb6f811f1c1ad65f62c1ef32e696c60fb1d8c3'
+RETIRED_SHA='66e197874fe627f3d5f58dff49737e7747d20bfe'
 ANNOUNCE_WORKFLOW='StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml'
 ANNOUNCE_IF="github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'"
 WF="$ROOT/.github/workflows/release-train.yml"
