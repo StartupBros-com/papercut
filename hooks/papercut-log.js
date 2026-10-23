@@ -49,6 +49,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { writeHookOutput } = require('../lib/hook-output');
 
 const MAX_ERR_CHARS = 400;
 // Truncate BEFORE redact()/signature(), never after. Several REDACTIONS patterns
@@ -181,6 +182,19 @@ const WRAPPER_LINE = /^\s*(?:exit code\s*\d+|command failed(?: with exit code \d
 // causes either.
 const HINT_LINE = /^\s*<claude-code-hint\b.*\/>\s*$/;
 
+// shape-rewrite.js echoes `[shape-rewrite] rewritten: <shapes>; no action
+// needed; original: <script>; signature: ...` before every rewritten call, so a
+// rewritten command that failed was keyed on that receipt instead of its cause:
+// 566 records in the 30 days to 2026-10-17, quarantined unread by papercut.py's
+// `rewrite-receipt-line` rule (the source harness#1840). Matched in full so a line that
+// merely starts the same way is still treated as output.
+const RECEIPT_LINE = /^\s*\[shape-rewrite\] rewritten: [a-z0-9+]+; no action needed; original: \S+; signature: guard_blocked:shape-rewrite:[a-z0-9+]+\s*$/;
+
+/** Lines the harness adds around a failure's output: never its content. */
+function harnessLine(l) {
+  return WRAPPER_LINE.test(l) || HINT_LINE.test(l) || RECEIPT_LINE.test(l);
+}
+
 // A bare traceback header is as content-free as the exit-code wrapper: measured
 // 2026-08-06, `bash:traceback (most recent call last):` collapsed 265 occurrences
 // across 105 sessions — JSONDecodeError, TypeError, KeyError, AttributeError,
@@ -212,7 +226,7 @@ const ERRORISH = /error|warn|fail|fatal|denied|refus|missing|cannot|unable|excep
 /** First line carrying actual content, skipping the harness's own wrapper lines. */
 function signalLine(text) {
   const lines = String(text).split('\n');
-  const content = lines.filter((l) => l.trim() && !WRAPPER_LINE.test(l) && !HINT_LINE.test(l));
+  const content = lines.filter((l) => l.trim() && !harnessLine(l));
   let real = content[0];
   if (real !== undefined && content.length > 1
       && PROGRESS_LINE.test(real) && !ERRORISH.test(real)) {
@@ -234,7 +248,7 @@ function signalLine(text) {
 
 /** True when a Bash failure carried nothing but the tool's own exit-code line. */
 function isContentFree(text) {
-  return !String(text).split('\n').some((l) => l.trim() && !WRAPPER_LINE.test(l) && !HINT_LINE.test(l));
+  return !String(text).split('\n').some((l) => l.trim() && !harnessLine(l));
 }
 
 // The old subject capture required the path to be followed only by whitespace
@@ -268,7 +282,22 @@ function basename(p) {
 // would push a record past MAX_RECORD_BYTES and drop it entirely.
 const SUBJ = (s) => String(s).slice(0, 100);
 
-function signature(err, toolName, target) {
+// shape-rewrite (its fresh-script-per-call, receipt-in-the-script, and friction-accounting rules): the PreToolUse hook writes the rewritten
+// call to `<scratchpad_dir>/shape-rewrite-<shapes>-<tool_use_id>.sh` and runs
+// it as `bash <path>`; a verifier release that starts refusing that
+// script-path form (the rewritten-call-still-refused case, an earlier change) must be told apart from the script
+// simply failing on its own. The command is checked here rather than the
+// error text because the verifier's refusal names no guard of its own, so it
+// cannot join the `BLOCKED by`-style branches below. Anchored full-string,
+// single unbounded quantifier (no nested repetition), and length-capped
+// before matching — bounded cost on an adversarial or truncation-skipped raw
+// command. The optional quotes tolerate a sibling hook's shellQuote()
+// convention (an-admission-guard.js) without assuming it.
+const SHAPE_REWRITE_CMD_CAP = 500;
+const SHAPE_REWRITE_SCRIPT = /^\s*bash\s+'?\S+\/shape-rewrite-([a-z0-9]+(?:\+[a-z0-9]+)*)-[\w-]+\.sh'?\s*$/;
+const VERIFIER_ISOLATION_REFUSAL = /isolated in the worktree/i;
+
+function signature(err, toolName, target, cmd) {
   const e = String(err || '');
   let m;
 
@@ -281,6 +310,13 @@ function signature(err, toolName, target) {
   if (/a-vcs-guard|ALLOW_DESTRUCTIVE_GIT|ALLOW_MAIN_COMMIT/.test(e)) return 'guard_blocked:a-vcs-guard';
   if (/Codex quota is explicitly unavailable/i.test(e)) return 'guard_blocked:another-guard';
   if (/circuit breaker TRIPPED|doghouse/i.test(e)) return 'guard_blocked:codex-doghouse';
+  // Placed after every hard-coded guard_blocked:* branch above, never before,
+  // so this can only ever pick up what none of those already claimed — it
+  // cannot shadow an existing guard_blocked:* signature.
+  if (VERIFIER_ISOLATION_REFUSAL.test(e)
+      && (m = SHAPE_REWRITE_SCRIPT.exec(String(cmd || '').slice(0, SHAPE_REWRITE_CMD_CAP)))) {
+    return `guard_blocked:shape-rewrite-refused:${SUBJ(m[1])}`;
+  }
   // `File does not exist` is the Read/Edit/Write phrasing for the same friction
   // Bash reports as ENOENT; without it those fragmented into the generic bucket
   // instead of joining this one (measured by live probe, 2026-08-06).
@@ -495,7 +531,10 @@ function record(input) {
 
   const rec = {
     ts: new Date().toISOString(),
-    sig: signature(err, input.tool_name, target),
+    // Raw, not `cmd` (which is redacted/trimmed): the shape-rewrite branch
+    // matches a script PATH, never a credential shape, so redaction has
+    // nothing to protect here and the plain field keeps the match exact.
+    sig: signature(err, input.tool_name, target, rawCmd),
     tool: String(input.tool_name || 'unknown').slice(0, 40),
     err: err.slice(0, MAX_ERR_CHARS),
     cmd: String(cmd).slice(0, 200),
@@ -563,17 +602,36 @@ function storeDir() {
  *
  * Returns true on write. NEVER throws: a guard's enforcement decision must not
  * depend on logging succeeding.
+ *
+ * keepMtime: `papercut staleness` reads the newest store mtime as proof that
+ * capture is alive. A writer that is not live capture (the transcript backfill,
+ * the SessionStart stray-.git heal) must pass it, or its records make a dead
+ * hook read healthy: the weekly runs the backfill right before staleness. The
+ * file keeps its old mtime; a file this write created gets mtime 0, since no
+ * capture write has touched it. The restore is skipped when the file grew by
+ * more than this record: another writer appended in between, and if it was a
+ * capture its mtime is the true one. A capture landing between that size check
+ * and the utimes still loses its advance; the worst case is a false STALE.
  */
-function appendRecord(cwd, line) {
+function appendRecord(cwd, line, { keepMtime = false } = {}) {
   try {
     if (!line) return false;
     const dir = storeDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${projectSlug(cwd)}.jsonl`);
+    let before = null;
     try {
-      if (fs.statSync(file).size > MAX_LOG_BYTES) return false;
+      before = fs.statSync(file);
+      if (before.size > MAX_LOG_BYTES) return false;
     } catch { /* first write for this project */ }
     fs.appendFileSync(file, line);
+    if (keepMtime) {
+      try {
+        if (fs.statSync(file).size === (before ? before.size : 0) + Buffer.byteLength(line)) {
+          fs.utimesSync(file, before ? before.atime : new Date(), before ? before.mtime : new Date(0));
+        }
+      } catch { /* best effort: the record is written */ }
+    }
     return true;
   } catch {
     return false;
@@ -701,8 +759,12 @@ function readLimitRepeatHint(input, storeFile) {
   const target = String((input.tool_input && input.tool_input.file_path) || '');
   if (!target) return null;
   const session = String(input.session_id || '').slice(-8);
+  // This path is Read-only (guarded above), so tool_input carries no `command`
+  // and the shape-rewrite branch never fires here — passed through only so
+  // this stays the same signature() the store's records were keyed with.
   const seen = repeatCount(storeFile, session, target,
-    signature(redactThenTrim(err), input.tool_name, target),
+    signature(redactThenTrim(err), input.tool_name, target,
+      (input.tool_input && input.tool_input.command) || ''),
     String(input.agent_id || '').slice(-8));
   if (seen < REPEAT_THRESHOLD) return null;
   return ('Attempt ' + seen + ' on this file in this session: it cannot be '
@@ -876,8 +938,12 @@ function run(rawInput) {
   return rawInput;
 }
 
+// `record` and MAX_RECORD_BYTES are exported for the transcript backfill
+// (claude/scripts/papercut-backfill.js), which builds records for the failures
+// this hook never receives with exactly this code, so a backfilled record and
+// a captured one cannot drift apart in shape, redaction or signature.
 module.exports = {
-  run, signature, normalize, projectSlug, redact, redactThenTrim, signalLine, isContentFree,
+  run, record, MAX_RECORD_BYTES, signature, normalize, projectSlug, redact, redactThenTrim, signalLine, isContentFree,
   appendRecord, logDenial, readLimitHint, structuredOutputHint, structuredOutputShape, workspaceBinHint, esmTestHint,
   storeDir,
 };
@@ -886,5 +952,5 @@ if (require.main === module) {
   let data = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (c) => { if (data.length < 1024 * 1024) data += c; });
-  process.stdin.on('end', () => process.stdout.write(run(data)));
+  process.stdin.on('end', () => writeHookOutput(run(data), data));
 }

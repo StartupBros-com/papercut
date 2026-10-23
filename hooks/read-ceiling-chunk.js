@@ -55,6 +55,7 @@
 const fs = require('fs');
 const path = require('path');
 const { storeDir, projectSlug, logDenial } = require('./papercut-log.js');
+const { writeHookOutput } = require('../lib/hook-output');
 
 const CEILING_SIG = /^read:file content .*exceeds maximum allowed/;
 const REAL_SESSION = /^[0-9a-f]{8}$/;
@@ -270,9 +271,18 @@ function run(rawInput) {
     const effective = remaining === null ? asked : Math.min(asked, remaining);
     if (effective <= limit) return rawInput;
     if (limit < MIN_LIMIT) {
-      // No window fits: the lines themselves blow the ceiling.
+      // No window fits: the lines themselves blow the ceiling. Unlike the
+      // reachable-window branch below, no rewrite-at-window escalation ever
+      // applies here -- there is no window to rewrite to -- so blind retries
+      // just keep landing on the same denial (90 in 11 sessions, 2026-09).
+      // From the second denial on, say which denial this is and to stop.
+      const stuck = denials >= 1
+        ? ' This is denial ' + (denials + 1) + ' for this file: no window will ever fit it '
+          + '(its lines are too long) -- stop calling Read on it this session; use Grep or a '
+          + 'bounded Bash extract instead.'
+        : '';
       return deny('Read stopped before running: no Read window fits ' + ti.file_path
-        + ' (its lines are too long). Use Grep for the part you need, or a Bash extract such as '
+        + ' (its lines are too long).' + stuck + ' Use Grep for the part you need, or a Bash extract such as '
         + '`head -c 20000 <file>` or `jq`/`python3` for JSON. Why: ' + history + '.', input, ti);
     }
 
@@ -325,7 +335,7 @@ if (require.main === module) {
   let data = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => { if (data.length < 1024 * 1024) data += chunk; });
-  process.stdin.on('end', () => { process.stdout.write(run(data)); process.exit(0); });
+  process.stdin.on('end', () => { writeHookOutput(run(data), data); process.exit(0); });
 }
 
 module.exports = { run, ceilingFailures, rungFor };
