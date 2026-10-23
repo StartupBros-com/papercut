@@ -237,16 +237,11 @@ class LauncherMissingPython3Test(unittest.TestCase):
                 self.assertIsNotNone(src, f"test host is missing {tool!r}; cannot build fixture")
                 (fakebin_path / tool).symlink_to(src)
 
-            env = dict(os.environ)
-            env["PAPERCUT_STORE"] = str(store)
-            env["PATH"] = fakebin  # coreutils present, python3 deliberately absent
-            result = subprocess.run(
-                [str(LAUNCHER), "--help"],
+            result = run_launcher(
+                ["--help"],
                 cwd=tmp,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30,
+                store=store,
+                extra_env={"PATH": fakebin},  # coreutils present, python3 deliberately absent
             )
             self.assertEqual(
                 result.returncode, 127,
