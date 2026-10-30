@@ -2953,6 +2953,19 @@ VERIFY_MIN_DAYS = 7
 VERIFY_EXPOSURE_FLOOR = 3
 
 
+def _positive_policy_bound(value, default: int, refusal_message: str) -> int:
+    """Convert a positive policy bound without changing caller defaults or refusals."""
+    if value is None:
+        return default
+    try:
+        bound = int(value)
+    except (TypeError, ValueError):
+        bound = 0
+    if bound < 1:
+        family_error(refusal_message, 3)
+    return bound
+
+
 def validate_window(window) -> int:
     """A verification window is a positive number of days, or the run is refused.
 
@@ -2962,15 +2975,9 @@ def validate_window(window) -> int:
     reads `provisional`. Both are exactly the silently-wrong output this feature
     exists to catch, so they are refused rather than corrected.
     """
-    if window is None:
-        return VERIFY_WINDOW_DAYS
-    try:
-        days = int(window)
-    except (TypeError, ValueError):
-        days = 0
-    if days < 1:
-        family_error("policy refusal: --window must be a positive number of days", 3)
-    return days
+    return _positive_policy_bound(
+        window, VERIFY_WINDOW_DAYS,
+        "policy refusal: --window must be a positive number of days")
 
 
 def verification_horizon_days(states, window_days: int) -> int:
@@ -3212,16 +3219,9 @@ def validate_unfamilied_limit(limit) -> int:
     section exists to end (252 of 253 flagged signatures had no family when it
     was added) — so, like `--window`, it is refused rather than corrected.
     """
-    if limit is None:
-        return TRIAGE_UNFAMILIED_LIMIT
-    try:
-        bound = int(limit)
-    except (TypeError, ValueError):
-        bound = 0
-    if bound < 1:
-        family_error(
-            "policy refusal: --unfamilied-limit must be a positive number of candidates", 3)
-    return bound
+    return _positive_policy_bound(
+        limit, TRIAGE_UNFAMILIED_LIMIT,
+        "policy refusal: --unfamilied-limit must be a positive number of candidates")
 
 
 def cmd_triage(args: argparse.Namespace) -> None:
